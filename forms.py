@@ -11,6 +11,16 @@ def display_torque_tamper_form(username, start_time, check_id):
     st.write(f"Start Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     
     with st.form("torque_tamper_form"):
+        # Add timestamp selection for historical data entry
+        st.write("#### Timestamp (for historical data entry)")
+        col1, col2 = st.columns(2)
+        with col1:
+            entry_date = st.date_input("Date", value=dt.date.today())
+        with col2:
+            entry_time = st.time_input("Time", value=dt.datetime.now().time())
+        
+        custom_timestamp = dt.datetime.combine(entry_date, entry_time)
+        st.caption("Leave at current date/time for real-time entries or adjust for historical data")
         st.write("#### Torque Values (5-12 range)")
         
         col1, col2 = st.columns(2)
@@ -47,7 +57,7 @@ def display_torque_tamper_form(username, start_time, check_id):
                 data = {
                     'check_id': check_id,
                     'username': username,
-                    'timestamp': dt.datetime.now(),
+                    'timestamp': custom_timestamp,  # Use custom timestamp for historical data entry
                     'start_time': start_time,
                     'head1_torque': head1_torque,
                     'head2_torque': head2_torque,
@@ -79,6 +89,16 @@ def display_net_content_form(username, start_time, check_id):
     st.write(f"Start Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     
     with st.form("net_content_form"):
+        # Add timestamp selection for historical data entry
+        st.write("#### Timestamp (for historical data entry)")
+        col1, col2 = st.columns(2)
+        with col1:
+            entry_date = st.date_input("Date", value=dt.date.today(), key="net_date")
+        with col2:
+            entry_time = st.time_input("Time", value=dt.datetime.now().time(), key="net_time")
+        
+        custom_timestamp = dt.datetime.combine(entry_date, entry_time)
+        st.caption("Leave at current date/time for real-time entries or adjust for historical data")
         col1, col2 = st.columns(2)
         
         with col1:
@@ -135,7 +155,7 @@ def display_net_content_form(username, start_time, check_id):
                 data = {
                     'check_id': check_id,
                     'username': username,
-                    'timestamp': dt.datetime.now(),
+                    'timestamp': custom_timestamp,  # Use custom timestamp for historical data entry
                     'start_time': start_time,
                     'brix': brix,
                     'titration_acid': titration_acid if titration_acid > 0 else None,
@@ -169,6 +189,17 @@ def display_quality_check_form(username, start_time, check_id):
     st.write(f"Start Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     
     with st.form("quality_check_form"):
+        # Add timestamp selection for historical data entry
+        st.write("#### Timestamp (for historical data entry)")
+        col1, col2 = st.columns(2)
+        with col1:
+            entry_date = st.date_input("Date", value=dt.date.today(), key="quality_date")
+        with col2:
+            entry_time = st.time_input("Time", value=dt.datetime.now().time(), key="quality_time")
+        
+        custom_timestamp = dt.datetime.combine(entry_date, entry_time)
+        st.caption("Leave at current date/time for real-time entries or adjust for historical data")
+        
         # Product Information
         st.write("#### Product Information")
         
@@ -178,8 +209,8 @@ def display_quality_check_form(username, start_time, check_id):
             trade_name = st.selectbox("Trade Name", ["Mazoe", "Fruitade", "Bonaqua", "Schweppes"])
             
             product_options = {
-                "Mazoe": ["Blackberry", "Raspberry", "Orange Crush"],
-                "Fruitade": ["Blackberry", "Raspberry", "Cream Soda"],
+                "Mazoe": ["Blackberry", "Raspberry", "Orange Crush", "Orange", "Peach", "Guava"],
+                "Fruitade": ["Blackberry", "Raspberry", "Cream Soda", "Peach", "Guava"],
                 "Bonaqua": ["Bonaqua Water"],
                 "Schweppes": ["Schweppes Still Water"]
             }
@@ -187,7 +218,9 @@ def display_quality_check_form(username, start_time, check_id):
             product = st.selectbox("Product", product_options[trade_name])
             
         with col2:
-            volume = st.selectbox("Volume", ["500ml", "1000ml", "2000ml", "5000ml"])
+            volume_options = ["330ml", "500ml", "1000ml", "2000ml", "5000ml"]
+            volume = st.text_input("Volume", help="Enter the volume (e.g., 500ml, 1L, 2L)")
+            st.caption("Common volumes: " + ", ".join(volume_options))
             cap_colour = st.selectbox("Cap Colour", ["Green", "Brown"])
             
         with col3:
@@ -261,7 +294,7 @@ def display_quality_check_form(username, start_time, check_id):
             data = {
                 'check_id': check_id,
                 'username': username,
-                'timestamp': dt.datetime.now(),
+                'timestamp': custom_timestamp,  # Use custom timestamp for historical data entry
                 'start_time': start_time,
                 'trade_name': trade_name,
                 'product': product,

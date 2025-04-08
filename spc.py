@@ -286,15 +286,47 @@ def display_spc_dashboard(start_date, end_date, product_filter=None):
         return
     
     # Create tabs for different chart types
-    tab_torque, tab_brix, tab_net_content = st.tabs(["Torque", "BRIX", "Net Content"])
+    tab_torque, tab_brix, tab_weight, tab_net_content = st.tabs(["Torque", "BRIX", "Average Weight", "Net Content"])
     
     with tab_torque:
         st.subheader("Torque Statistical Process Control")
         
         # Filter for torque data
         torque_data = data[data['source'] == 'torque_tamper'].copy()
+        quality_torque_data = data[data['source'] == 'quality_check'].copy()
+        
+        # Check if we have torque test data in the quality checks
+        if 'torque_test' in quality_torque_data.columns:
+            st.markdown("#### Overall Torque Test Results")
+            # Convert PASS/FAIL to 1/0 for charting purposes
+            if quality_torque_data['torque_test'].notna().sum() > 0:
+                quality_torque_data['torque_numeric'] = quality_torque_data['torque_test'].apply(lambda x: 1 if x == 'PASS' else 0)
+                
+                # Calculate pass rate percentage
+                pass_rate = quality_torque_data['torque_numeric'].mean() * 100
+                st.metric("Torque Test Pass Rate", f"{pass_rate:.1f}%")
+                
+                # Display torque test trend if we have enough data
+                if quality_torque_data['torque_numeric'].notna().sum() >= 5:
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=quality_torque_data['timestamp'],
+                        y=quality_torque_data['torque_numeric'].rolling(window=5, min_periods=1).mean() * 100,
+                        mode='lines+markers',
+                        name='Pass Rate (5-point moving average)',
+                        line=dict(color='blue')
+                    ))
+                    fig.update_layout(
+                        title="Torque Test Pass Rate Trend",
+                        xaxis_title="Date",
+                        yaxis_title="Pass Rate (%)",
+                        yaxis=dict(range=[0, 105]),
+                        height=300
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
         
         if not torque_data.empty:
+            st.markdown("#### Individual Torque Measurements")
             # Create individual charts for each head
             for head in ['head1_torque', 'head2_torque', 'head3_torque', 'head4_torque', 'head5_torque']:
                 # Skip if no non-NA values
@@ -322,6 +354,24 @@ def display_spc_dashboard(start_date, end_date, product_filter=None):
                         title=f"Moving Range Chart - {head.replace('_', ' ').title()}"
                     )
                     st.plotly_chart(fig_mr, use_container_width=True)
+                
+                # Add torque metrics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Average Torque", f"{torque_data[head].mean():.2f}")
+                with col2:
+                    st.metric("Min Torque", f"{torque_data[head].min():.2f}")
+                with col3:
+                    st.metric("Max Torque", f"{torque_data[head].max():.2f}")
+                
+                # Add specification limits
+                st.markdown("**Specification Limits**: 5.0 - 12.0")
+                
+                # Calculate percentage within specs
+                within_spec = ((torque_data[head] >= 5.0) & (torque_data[head] <= 12.0)).mean() * 100
+                st.metric("Percentage Within Spec", f"{within_spec:.1f}%")
+                
+                st.markdown("---")
         else:
             st.info("No torque data available for the selected time period")
     
@@ -330,11 +380,23 @@ def display_spc_dashboard(start_date, end_date, product_filter=None):
         
         # Filter for brix data (can be in either net_content or quality_check)
         brix_data = pd.concat([
-            data[data['source'] == 'net_content'][['timestamp', 'brix']],
-            data[data['source'] == 'quality_check'][['timestamp', 'brix']]
+            data[data['source'] == 'net_content'][['timestamp', 'brix', 'product']],
+            data[data['source'] == 'quality_check'][['timestamp', 'brix', 'product']]
         ]).dropna(subset=['brix'])
         
         if len(brix_data) >= 2:
+            # Add product-specific analysis if we have product information
+            if 'product' in brix_data.columns and brix_data['product'].notna().any():
+                # Get unique products for selection
+                products = sorted(brix_data['product'].dropna().unique())
+                if len(products) > 1:
+                    selected_product = st.selectbox("Select Product for BRIX Analysis", 
+                                                  ["All Products"] + list(products))
+                    
+                    if selected_product != "All Products":
+                        brix_data = brix_data[brix_data['product'] == selected_product]
+                        st.subheader(f"BRIX Analysis for {selected_product}")
+            
             col1, col2 = st.columns(2)
             
             with col1:
@@ -354,8 +416,126 @@ def display_spc_dashboard(start_date, end_date, product_filter=None):
                     title="Moving Range Chart - BRIX"
                 )
                 st.plotly_chart(fig_brix_mr, use_container_width=True)
+            
+            # Add BRIX metrics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Average BRIX", f"{brix_data['brix'].mean():.2f}")
+            with col2:
+                st.metric("Min BRIX", f"{brix_data['brix'].min():.2f}")
+            with col3:
+                st.metric("Max BRIX", f"{brix_data['brix'].max():.2f}")
+            with col4:
+                st.metric("BRIX Std Dev", f"{brix_data['brix'].std():.3f}")
+            
+            # BRIX trend chart
+            st.markdown("#### BRIX Trend")
+            fig = go.Figure()
+            
+            # Sort data by timestamp for trend analysis
+            trend_data = brix_data.sort_values('timestamp')
+            
+            # Add individual data points
+            fig.add_trace(go.Scatter(
+                x=trend_data['timestamp'],
+                y=trend_data['brix'],
+                mode='markers',
+                name='BRIX Values',
+                marker=dict(color='blue', size=8)
+            ))
+            
+            # Add trend line (moving average)
+            if len(trend_data) >= 3:
+                fig.add_trace(go.Scatter(
+                    x=trend_data['timestamp'],
+                    y=trend_data['brix'].rolling(window=3, min_periods=1).mean(),
+                    mode='lines',
+                    name='Trend (3-point MA)',
+                    line=dict(color='red', width=2)
+                ))
+            
+            fig.update_layout(
+                title="BRIX Trend Over Time",
+                xaxis_title="Date",
+                yaxis_title="BRIX Value",
+                height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Insufficient BRIX data for SPC analysis")
+    
+    with tab_weight:
+        st.subheader("Average Weight Statistical Process Control")
+        
+        # Filter for average weight data
+        weight_data = data[data['source'] == 'net_content'].copy()
+        
+        if not weight_data.empty and 'average_weight' in weight_data.columns:
+            # Check if enough non-NA values
+            if weight_data['average_weight'].notna().sum() >= 2:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # X-bar chart for Average Weight
+                    fig_weight = create_xbar_chart(
+                        weight_data, 
+                        'average_weight', 
+                        title="Individual Values Chart - Average Weight"
+                    )
+                    st.plotly_chart(fig_weight, use_container_width=True)
+                
+                with col2:
+                    # Moving Range chart for Average Weight
+                    fig_weight_mr = create_moving_range_chart(
+                        weight_data,
+                        'average_weight',
+                        title="Moving Range Chart - Average Weight"
+                    )
+                    st.plotly_chart(fig_weight_mr, use_container_width=True)
+                
+                # Weight metrics
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Average Weight", f"{weight_data['average_weight'].mean():.2f}")
+                with col2:
+                    st.metric("Min Weight", f"{weight_data['average_weight'].min():.2f}")
+                with col3:
+                    st.metric("Max Weight", f"{weight_data['average_weight'].max():.2f}")
+                with col4:
+                    st.metric("Weight Std Dev", f"{weight_data['average_weight'].std():.3f}")
+                
+                # Show individual bottle weights distribution if available
+                bottle_cols = ['bottle1_weight', 'bottle2_weight', 'bottle3_weight', 
+                               'bottle4_weight', 'bottle5_weight']
+                if all(col in weight_data.columns for col in bottle_cols):
+                    st.markdown("#### Individual Bottle Weights Distribution")
+                    
+                    # Gather all individual bottle weights
+                    all_weights = []
+                    for col in bottle_cols:
+                        all_weights.extend(weight_data[col].dropna().tolist())
+                    
+                    if all_weights:
+                        # Create histogram
+                        fig = go.Figure()
+                        fig.add_trace(go.Histogram(
+                            x=all_weights,
+                            nbinsx=20,
+                            marker_color='blue',
+                            opacity=0.7
+                        ))
+                        
+                        fig.update_layout(
+                            title="Distribution of Individual Bottle Weights",
+                            xaxis_title="Weight",
+                            yaxis_title="Count",
+                            height=400
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Insufficient Average Weight data for SPC analysis")
+        else:
+            st.info("No Average Weight data available for the selected time period")
     
     with tab_net_content:
         st.subheader("Net Content Statistical Process Control")
@@ -385,6 +565,17 @@ def display_spc_dashboard(start_date, end_date, product_filter=None):
                         title="Moving Range Chart - Net Content"
                     )
                     st.plotly_chart(fig_nc_mr, use_container_width=True)
+                
+                # Net content metrics
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Average Net Content", f"{net_content_data['net_content'].mean():.2f}")
+                with col2:
+                    st.metric("Min Net Content", f"{net_content_data['net_content'].min():.2f}")
+                with col3:
+                    st.metric("Max Net Content", f"{net_content_data['net_content'].max():.2f}")
+                with col4:
+                    st.metric("Net Content Std Dev", f"{net_content_data['net_content'].std():.3f}")
             else:
                 st.info("Insufficient Net Content data for SPC analysis")
         else:
