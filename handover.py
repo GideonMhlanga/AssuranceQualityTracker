@@ -453,7 +453,6 @@ def display_handover_creation_form():
     """Display the form for creating a shift handover report"""
     st.subheader("Create Shift Handover Report")
     
-     # Get current user from session state
     if 'username' not in st.session_state:
         st.error("You must be logged in to create a handover report")
         return
@@ -462,8 +461,44 @@ def display_handover_creation_form():
     shifts = get_active_shifts()
     shift_names = shifts['shift_name'].tolist() if not shifts.empty else ["Morning A", "Morning B", "Night"]
     current_shift = get_current_shift()
-    default_outgoing_lead = st.session_state.get('username', "")
     
+    # Initialize tasks in session state if not exists
+    if 'tasks' not in st.session_state:
+        st.session_state.tasks = []
+    
+    # Handle task addition outside the form
+    new_task = st.text_input("Add new task", key="new_task_input")
+    if st.button("➕ Add Task", key="add_task_button"):
+        if new_task.strip():
+            st.session_state.tasks.append({"text": new_task.strip(), "completed": False})
+            st.rerun()
+    
+    # Display current tasks
+    if st.session_state.tasks:
+        st.write("Current Tasks:")
+        for i, task in enumerate(st.session_state.tasks):
+            cols = st.columns([1, 10, 2])
+            with cols[0]:
+                completed = st.checkbox(
+                    "", 
+                    value=task["completed"], 
+                    key=f"task_{i}_completed",
+                    label_visibility="collapsed"
+                )
+                if completed != task["completed"]:
+                    st.session_state.tasks[i]["completed"] = completed
+                    st.rerun()
+            with cols[1]:
+                task_text = task["text"]
+                if completed:
+                    task_text = f"~~{task_text}~~"
+                st.markdown(task_text)
+            with cols[2]:
+                if st.button("🗑️", key=f"task_{i}_delete"):
+                    st.session_state.tasks.pop(i)
+                    st.rerun()
+    
+    # Main handover form
     with st.form("handover_form", clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
@@ -475,9 +510,8 @@ def display_handover_creation_form():
                 index=shift_names.index(current_shift) if current_shift in shift_names else 0
             )
 
-        st.text_input("Outgoing Shift Lead", outgoing_lead, disabled=True)
-
-        incoming_lead = st.text_input("Incoming Shift Lead")
+        outgoing_lead = st.text_input("Outgoing Shift Lead", outgoing_lead, disabled=True)
+        incoming_lead = st.text_input("Incoming Shift Lead", key="incoming_lead_input")
         
         auto_summary = generate_production_summary(shift_date, shift_type)
         if auto_summary:
@@ -494,64 +528,13 @@ def display_handover_creation_form():
                 if auto_summary['avg_torque'] is not None:
                     st.write(f"**Average Torque:** {auto_summary['avg_torque']:.2f}")
         
-        col1, col2 = st.columns(2)
-        with col1:
-            outgoing_lead = st.text_input("Outgoing Shift Lead", default_outgoing_lead)
-        with col2:
-            incoming_lead = st.text_input("Incoming Shift Lead")
-        
         production_summary = st.text_area("Production Summary", height=100)
         
         cols = st.columns(2)
         with cols[0]:
-            quality_issues = st.text_area("Quality Issues", height=100)
+            quality_issues = st.text_area("Quality Issues", height=100, key="quality_issues_input")
         with cols[1]:
-            equipment_issues = st.text_area("Equipment Issues", height=100)
-        
-        # Enhanced Pending Tasks with to-do list functionality
-        st.subheader("Pending Tasks")
-        st.markdown("Add tasks for the incoming shift lead:")
-        
-        # Initialize tasks in session state if not exists
-        if 'tasks' not in st.session_state:
-            st.session_state.tasks = []
-        
-        # Add new task
-        new_task_col, add_col = st.columns([4, 1])
-        with new_task_col:
-            new_task = st.text_input("Add new task", key="new_task_input", label_visibility="collapsed")
-        with add_col:
-            if st.button("➕ Add", use_container_width=True):
-                if new_task.strip():
-                    st.session_state.tasks.append({"text": new_task.strip(), "completed": False})
-                    # Clear the input by rerunning
-                    st.rerun()
-        
-        # Display tasks with checkboxes
-        if st.session_state.tasks:
-            st.markdown("---")
-            for i, task in enumerate(st.session_state.tasks):
-                cols = st.columns([1, 10, 2])
-                with cols[0]:
-                    completed = st.checkbox(
-                        "", 
-                        value=task["completed"], 
-                        key=f"task_{i}_completed",
-                        label_visibility="collapsed"
-                    )
-                    if completed != task["completed"]:
-                        st.session_state.tasks[i]["completed"] = completed
-                        st.rerun()
-                with cols[1]:
-                    task_text = task["text"]
-                    if completed:
-                        task_text = f"~~{task_text}~~"
-                    st.markdown(task_text)
-                with cols[2]:
-                    if st.button("🗑️", key=f"task_{i}_delete"):
-                        st.session_state.tasks.pop(i)
-                        st.rerun()
-            st.markdown("---")
+            equipment_issues = st.text_area("Equipment Issues", height=100, key="equipment_issues_input")
         
         # Convert tasks to string for database storage
         pending_tasks = "\n".join(
@@ -559,7 +542,7 @@ def display_handover_creation_form():
              for task in st.session_state.tasks]
         )
 
-        comments = st.text_area("Additional Comments", height=100)
+        comments = st.text_area("Additional Comments", height=100, key="comments_input")
         
         submitted = st.form_submit_button("Submit Handover Report", type="primary")
         
@@ -578,8 +561,9 @@ def display_handover_creation_form():
                     if html_report:
                         filename = f"handover_{shift_date}_{shift_type}.html"
                         st.markdown(get_html_download_link(html_report, filename), unsafe_allow_html=True)
+                    st.session_state.tasks = []  # Clear tasks after submission
                     st.rerun()
-
+                    
 # Display handover review page
 def display_handover_review_page():
     """Display the page for reviewing and acknowledging handover reports"""
