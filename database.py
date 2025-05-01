@@ -8,7 +8,7 @@ import psycopg2
 from urllib.parse import urlparse
 
 # Get database URL from environment variable
-DATABASE_URL = os.environ.get('DATABSE_URL') or 'postgresql://gmhlanga:2001@localhost:5432/beverage_qa_db'
+DATABASE_URL = os.environ.get('DATABSE_URL') or 'postgresql://anesu:shammah2002*@localhost:5432/beverage_qa_db'
 
 def get_conn():
     """Get connection to PostgreSQL database"""
