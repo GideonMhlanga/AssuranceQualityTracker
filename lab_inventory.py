@@ -1,453 +1,516 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import datetime as dt
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email.mime.text import MIMEText
+from email import encoders
 from docx import Document
-from docx.shared import Inches
+from docx.shared import RGBColor, Inches, Pt
 from io import BytesIO
+import plotly.express as px
+import plotly.graph_objects as go
+from PIL import Image
+import os
 
-def display_lab_inventory_page():
-    st.title("Lab Inventory Management")
-    
-    # Initialize session state for inventory if it doesn't exist
-    if 'lab_inventory' not in st.session_state:
-        # Load the initial data from the template you provided
-        st.session_state.lab_inventory = initialize_inventory_data()
-    
-    # Main tabs for different sections
-    tab1, tab2, tab3, tab4 = st.tabs(["Inventory Dashboard", "Add/Edit Items", "Low Stock Alerts", "Export Report"])
-    
-    with tab1:
-        display_inventory_dashboard()
-    
-    with tab2:
-        add_edit_inventory_items()
-    
-    with tab3:
-        display_low_stock_alerts()
-    
-    with tab4:
-        export_inventory_report()
+# Configuration
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+INVENTORY_CATEGORIES = {
+    "chemicals": ["Reagent", "Solvent", "Buffer", "Indicator", "Acid", "Base"],
+    "glassware": ["Volumetric", "Measuring", "Container", "Specialty"],
+    "equipment": ["Instrument", "Device", "Tool", "Machine"]
+}
 
-def initialize_inventory_data():
-    """Initialize with the data from your template"""
-    chemicals_data = [
-        # Chemicals and reagents
-        {"Item": "DPD#4 tablets", "Minimum stock": 750, "Monthly usage": 125, "Stock on hand": 410, "Expiry date": "09/2028", "Comment": ""},
-        {"Item": "DPD#1 tablets", "Minimum stock": 750, "Monthly usage": 125, "Stock on hand": 550, "Expiry date": "04/2034", "Comment": ""},
-        {"Item": "TPTZ Iron sachets", "Minimum stock": 75, "Monthly usage": 25, "Stock on hand": 24, "Expiry date": "05/2028", "Comment": "restock"},
-        # Add all other items from your template here...
-    ]
-    
-    glassware_data = [
-        # Glassware
-        {"Item": "2000 cm³ volumetric flask", "Stock on hand": 2, "Comment": ""},
-        {"Item": "1000ml volumetric flasks", "Stock on hand": 9, "Comment": ""},
-        # Add all other glassware items...
-    ]
-    
-    equipment_data = [
-        # Equipment
-        {"Equipment": "pH meter", "Stock at hand": 1, "Status": "Working", "Comment": ""},
-        {"Equipment": "Refractometer (J57 automatic)", "Stock at hand": 2, "Status": "1 not working", "Comment": "Does not switch on"},
-        # Add all other equipment...
-    ]
-    
-    return {
-        "chemicals": pd.DataFrame(chemicals_data),
-        "glassware": pd.DataFrame(glassware_data),
-        "equipment": pd.DataFrame(equipment_data)
-    }
-
-def display_inventory_dashboard():
-    """Display summary of inventory"""
-    st.subheader("Inventory Summary")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        total_chemicals = len(st.session_state.lab_inventory["chemicals"])
-        expiring_soon = len(st.session_state.lab_inventory["chemicals"][
-            st.session_state.lab_inventory["chemicals"]["Expiry date"].apply(
-                lambda x: is_expiring_soon(x) if pd.notna(x) else False
-            )
-        ])
-        st.metric("Chemicals/Reagents", total_chemicals, f"{expiring_soon} expiring soon")
-    
-    with col2:
-        total_glassware = len(st.session_state.lab_inventory["glassware"])
-        broken_items = len(st.session_state.lab_inventory["glassware"][
-            st.session_state.lab_inventory["glassware"]["Comment"].str.contains("broken", case=False, na=False)
-        ])
-        st.metric("Glassware", total_glassware, f"{broken_items} broken/damaged")
-    
-    with col3:
-        total_equipment = len(st.session_state.lab_inventory["equipment"])
-        non_working = len(st.session_state.lab_inventory["equipment"][
-            st.session_state.lab_inventory["equipment"]["Status"].str.contains("not working", case=False, na=False)
-        ])
-        st.metric("Equipment", total_equipment, f"{non_working} not working")
-    
-    # Display recent changes/activity log
-    st.subheader("Recent Inventory Changes")
-    # You would implement this based on your tracking needs
-
-def is_expiring_soon(expiry_date, months=3):
-    """Check if an item is expiring soon (within the next X months)"""
-    try:
-        if "/" in expiry_date:
-            month, year = map(int, expiry_date.split("/"))
-        elif "-" in expiry_date:
-            year, month = map(int, expiry_date.split("-"))
-        else:
-            return False
+class LabInventory:
+    def __init__(self):
+        self.initialize_data()
         
-        expiry_dt = dt.datetime(year=year, month=month, day=1)
+    def initialize_data(self):
+        """Initialize inventory data structure"""
+        if 'lab_inventory' not in st.session_state:
+            st.session_state.lab_inventory = {
+                "chemicals": pd.DataFrame(columns=[
+                    "ID", "Item", "Category", "Minimum", "Current", "Unit", 
+                    "Expiry", "Location", "Supplier", "Comment", "Status"
+                ]),
+                "glassware": pd.DataFrame(columns=[
+                    "ID", "Item", "Category", "Current", "Unit", 
+                    "Location", "Comment", "Status"
+                ]),
+                "equipment": pd.DataFrame(columns=[
+                    "ID", "Item", "Category", "Current", "Unit", 
+                    "Location", "Status", "Last Calibration", "Comment"
+                ])
+            }
+            self.load_sample_data()
+            self.check_restock_status()
+    
+    def load_sample_data(self):
+        """Load sample inventory data"""
+        sample_chemicals = [
+            {"ID": "CHEM-001", "Item": "DPD#4 tablets", "Category": "Reagent", 
+             "Minimum": 750, "Current": 410, "Unit": "tablets", 
+             "Expiry": "09/2028", "Location": "Shelf A1", 
+             "Supplier": "Sigma-Aldrich", "Comment": "", "Status": "Low"},
+            {"ID": "CHEM-002", "Item": "Sodium Hydroxide", "Category": "Base", 
+             "Minimum": 5, "Current": 3.7, "Unit": "kg", 
+             "Expiry": "05/2025", "Location": "Cabinet B2", 
+             "Supplier": "Fisher Scientific", "Comment": "Corrosive", "Status": "OK"}
+        ]
+        
+        sample_glassware = [
+            {"ID": "GLAS-001", "Item": "1000ml volumetric flask", 
+             "Category": "Volumetric", "Current": 5, "Unit": "pieces", 
+             "Location": "Cabinet 3", "Comment": "", "Status": "OK"},
+            {"ID": "GLAS-002", "Item": "50ml burette", 
+             "Category": "Measuring", "Current": 2, "Unit": "pieces", 
+             "Location": "Drawer 1", "Comment": "1 needs repair", "Status": "Damaged"}
+        ]
+        
+        sample_equipment = [
+            {"ID": "EQUIP-001", "Item": "pH meter", 
+             "Category": "Instrument", "Current": 1, "Unit": "units", 
+             "Location": "Bench 2", "Status": "Working", 
+             "Last Calibration": "01/2024", "Comment": ""},
+            {"ID": "EQUIP-002", "Item": "Analytical balance", 
+             "Category": "Instrument", "Current": 2, "Unit": "units", 
+             "Location": "Bench 1", "Status": "1 needs service", 
+             "Last Calibration": "03/2024", "Comment": "Annual maintenance due"}
+        ]
+        
+        st.session_state.lab_inventory["chemicals"] = pd.DataFrame(sample_chemicals)
+        st.session_state.lab_inventory["glassware"] = pd.DataFrame(sample_glassware)
+        st.session_state.lab_inventory["equipment"] = pd.DataFrame(sample_equipment)
+    
+    def check_restock_status(self):
+        """Check and update inventory status"""
+        chem_df = st.session_state.lab_inventory["chemicals"]
+        
+        # Update chemical status
+        chem_df["Status"] = np.where(
+            chem_df["Current"] < chem_df["Minimum"],
+            "Low",
+            "OK"
+        )
+        
+        # Update expiry status
         today = dt.datetime.now()
-        return (expiry_dt - today).days <= months*30
-    except:
-        return False
-
-def add_edit_inventory_items():
-    """Interface for adding or editing inventory items"""
-    st.subheader("Manage Inventory Items")
+        chem_df["Expiry"] = pd.to_datetime(chem_df["Expiry"], errors='coerce')
+        mask = (chem_df["Expiry"] < today) & (~chem_df["Expiry"].isna())
+        chem_df.loc[mask, "Status"] = "Expired"
+        
+        st.session_state.lab_inventory["chemicals"] = chem_df
     
-    category = st.selectbox("Select Category", ["Chemicals/Reagents", "Glassware", "Equipment"])
+    def display_main_interface(self):
+        """Main inventory management interface"""
+        st.title("🔬 Laboratory Inventory Management System")
+        
+        tabs = st.tabs([
+            "📊 Dashboard", 
+            "📦 Inventory", 
+            "📈 Analytics", 
+            "⚠️ Alerts", 
+            "📤 Export"
+        ])
+        
+        with tabs[0]:
+            self.display_dashboard()
+        with tabs[1]:
+            self.display_inventory_management()
+        with tabs[2]:
+            self.display_analytics()
+        with tabs[3]:
+            self.display_alerts()
+        with tabs[4]:
+            self.display_export()
     
-    if category == "Chemicals/Reagents":
-        manage_chemicals()
-    elif category == "Glassware":
-        manage_glassware()
-    else:
-        manage_equipment()
-
-def manage_chemicals():
-    """Manage chemicals and reagents"""
-    df = st.session_state.lab_inventory["chemicals"]
+    def display_dashboard(self):
+        """Display inventory dashboard"""
+        st.subheader("Inventory Overview")
+        
+        # Calculate metrics
+        chem_stats = self.calculate_category_stats("chemicals")
+        glass_stats = self.calculate_category_stats("glassware")
+        equip_stats = self.calculate_category_stats("equipment")
+        
+        # Display metrics
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("🧪 Chemicals", 
+                     f"{chem_stats['total']} items",
+                     f"{chem_stats['low']} low, {chem_stats['expired']} expired")
+        with col2:
+            st.metric("🔍 Glassware", 
+                     f"{glass_stats['total']} items",
+                     f"{glass_stats['damaged']} damaged")
+        with col3:
+            st.metric("⚙️ Equipment", 
+                     f"{equip_stats['total']} items",
+                     f"{equip_stats['issues']} with issues")
+        
+        # Recent activity
+        st.subheader("Recent Activity")
+        st.info("Feature coming soon! Will show recent inventory changes.")
+        
+        # Quick actions
+        st.subheader("Quick Actions")
+        if st.button("Check All Alerts", use_container_width=True):
+            st.session_state.current_tab = "⚠️ Alerts"
+            st.rerun()
     
-    with st.expander("Add New Chemical/Reagent"):
-        with st.form("add_chemical_form"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                item = st.text_input("Item Name")
-                min_stock = st.number_input("Minimum Stock Level", min_value=0)
-                stock_on_hand = st.number_input("Current Stock", min_value=0)
-            
-            with col2:
-                monthly_usage = st.number_input("Monthly Usage", min_value=0)
-                expiry_date = st.text_input("Expiry Date (MM/YYYY)", placeholder="09/2028")
-                comment = st.text_input("Comments")
-            
-            if st.form_submit_button("Add Item"):
-                new_item = {
-                    "Item": item,
-                    "Minimum stock": min_stock,
-                    "Monthly usage": monthly_usage,
-                    "Stock on hand": stock_on_hand,
-                    "Expiry date": expiry_date,
-                    "Comment": comment
-                }
-                df.loc[len(df)] = new_item
-                st.success("Item added successfully!")
-                st.session_state.lab_inventory["chemicals"] = df
+    def calculate_category_stats(self, category):
+        """Calculate statistics for a category"""
+        df = st.session_state.lab_inventory[category]
+        stats = {"total": len(df)}
+        
+        if category == "chemicals":
+            stats["low"] = len(df[df["Status"] == "Low"])
+            stats["expired"] = len(df[df["Status"] == "Expired"])
+        elif category == "glassware":
+            stats["damaged"] = len(df[df["Status"] == "Damaged"])
+        elif category == "equipment":
+            stats["issues"] = len(df[df["Status"].str.contains("need", case=False)])
+        
+        return stats
     
-    st.subheader("Current Chemicals/Reagents")
-    st.dataframe(df, use_container_width=True)
-
-def manage_glassware():
-    """Manage glassware items"""
-    df = st.session_state.lab_inventory["glassware"]
-    
-    with st.expander("Add New Glassware"):
-        with st.form("add_glassware_form"):
-            item = st.text_input("Item Name")
-            stock = st.number_input("Quantity in Stock", min_value=0)
-            comment = st.text_input("Comments (e.g., broken, damaged)")
-            
-            if st.form_submit_button("Add Glassware"):
-                new_item = {
-                    "Item": item,
-                    "Stock on hand": stock,
-                    "Comment": comment
-                }
-                df.loc[len(df)] = new_item
-                st.success("Glassware added successfully!")
-                st.session_state.lab_inventory["glassware"] = df
-    
-    st.subheader("Current Glassware Inventory")
-    st.dataframe(df, use_container_width=True)
-
-def manage_equipment():
-    """Manage equipment items"""
-    df = st.session_state.lab_inventory["equipment"]
-    
-    with st.expander("Add New Equipment"):
-        with st.form("add_equipment_form"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                equipment = st.text_input("Equipment Name")
-                stock = st.number_input("Quantity", min_value=0)
-            
-            with col2:
-                status = st.selectbox("Status", ["Working", "Not working", "In repair"])
-                comment = st.text_input("Comments")
-            
-            if st.form_submit_button("Add Equipment"):
-                new_item = {
-                    "Equipment": equipment,
-                    "Stock at hand": stock,
-                    "Status": status,
-                    "Comment": comment
-                }
-                df.loc[len(df)] = new_item
-                st.success("Equipment added successfully!")
-                st.session_state.lab_inventory["equipment"] = df
-    
-    st.subheader("Current Equipment Inventory")
-    st.dataframe(df, use_container_width=True)
-
-def display_low_stock_alerts():
-    """Display items that need restocking"""
-    st.subheader("Restocking Alerts")
-    
-    # Chemicals that are below minimum stock
-    chemicals = st.session_state.lab_inventory["chemicals"]
-    low_stock_chemicals = chemicals[chemicals["Stock on hand"] < chemicals["Minimum stock"]]
-    
-    # Expiring soon chemicals
-    expiring_chemicals = chemicals[
-        chemicals["Expiry date"].apply(
-            lambda x: is_expiring_soon(x) if pd.notna(x) else False
+    def display_inventory_management(self):
+        """Inventory management interface"""
+        st.subheader("Manage Inventory")
+        
+        category = st.selectbox(
+            "Select Category",
+            ["Chemicals", "Glassware", "Equipment"],
+            key="inventory_category"
         )
-    ]
-    
-    # Glassware that needs attention (broken or low quantity)
-    glassware = st.session_state.lab_inventory["glassware"]
-    low_glassware = glassware[
-        (glassware["Stock on hand"] < 2) | 
-        (glassware["Comment"].str.contains("broken", case=False, na=False))
-    ]
-    
-    # Equipment that's not working
-    equipment = st.session_state.lab_inventory["equipment"]
-    non_working_equip = equipment[
-        equipment["Status"].str.contains("not working", case=False, na=False)
-    ]
-    
-    # Display alerts in tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["Low Stock Chemicals", "Expiring Soon", "Glassware Issues", "Equipment Issues"])
-    
-    with tab1:
-        if not low_stock_chemicals.empty:
-            st.dataframe(low_stock_chemicals, use_container_width=True)
+        
+        if category == "Chemicals":
+            self.manage_chemicals()
+        elif category == "Glassware":
+            self.manage_glassware()
         else:
-            st.success("No chemicals below minimum stock levels")
+            self.manage_equipment()
     
-    with tab2:
-        if not expiring_chemicals.empty:
-            st.dataframe(expiring_chemicals, use_container_width=True)
-        else:
-            st.success("No chemicals expiring soon")
-    
-    with tab3:
-        if not low_glassware.empty:
-            st.dataframe(low_glassware, use_container_width=True)
-        else:
-            st.success("No glassware issues")
-    
-    with tab4:
-        if not non_working_equip.empty:
-            st.dataframe(non_working_equip, use_container_width=True)
-        else:
-            st.success("All equipment is functional")
-
-def export_inventory_report():
-    """Generate and export a Word document report"""
-    st.subheader("Export Inventory Report")
-    
-    # Report options
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        report_type = st.selectbox(
-            "Report Type",
-            ["Full Inventory", "Chemicals Only", "Glassware Only", "Equipment Only", "Restocking List"]
+    def manage_chemicals(self):
+        """Chemical inventory management"""
+        df = st.session_state.lab_inventory["chemicals"]
+        
+        # Add new chemical
+        with st.expander("➕ Add New Chemical", expanded=False):
+            with st.form("add_chemical_form"):
+                cols = st.columns([1, 2, 1])
+                with cols[0]:
+                    new_id = f"CHEM-{len(df)+1:03d}"
+                    st.text_input("ID", value=new_id, disabled=True)
+                    item_name = st.text_input("Item Name")
+                    category = st.selectbox("Category", INVENTORY_CATEGORIES["chemicals"])
+                with cols[1]:
+                    min_stock = st.number_input("Minimum Stock", min_value=0.0, step=0.1)
+                    current_stock = st.number_input("Current Stock", min_value=0.0, step=0.1)
+                    unit = st.selectbox("Unit", ["g", "kg", "L", "mL", "tablets", "bottles"])
+                with cols[2]:
+                    expiry = st.text_input("Expiry (MM/YYYY)", placeholder="06/2025")
+                    location = st.text_input("Storage Location")
+                    supplier = st.text_input("Supplier")
+                
+                if st.form_submit_button("Add Chemical"):
+                    new_item = {
+                        "ID": new_id,
+                        "Item": item_name,
+                        "Category": category,
+                        "Minimum": min_stock,
+                        "Current": current_stock,
+                        "Unit": unit,
+                        "Expiry": expiry,
+                        "Location": location,
+                        "Supplier": supplier,
+                        "Comment": "",
+                        "Status": "Low" if current_stock < min_stock else "OK"
+                    }
+                    df.loc[len(df)] = new_item
+                    st.success(f"Added {item_name} to inventory")
+                    self.check_restock_status()
+        
+        # Edit existing chemicals
+        st.subheader("Current Chemical Inventory")
+        edited_df = st.data_editor(
+            df,
+            num_rows="dynamic",
+            use_container_width=True,
+            disabled=["ID"],
+            column_config={
+                "Status": st.column_config.SelectboxColumn(
+                    "Status",
+                    options=["OK", "Low", "Expired"],
+                    required=True
+                ),
+                "Expiry": st.column_config.DateColumn(
+                    "Expiry Date",
+                    format="MM/YYYY"
+                )
+            }
         )
+        
+        if not df.equals(edited_df):
+            st.session_state.lab_inventory["chemicals"] = edited_df
+            self.check_restock_status()
+            st.rerun()
     
-    with col2:
-        include_comments = st.checkbox("Include Comments", value=True)
+    def display_analytics(self):
+        """Inventory analytics and visualization"""
+        st.subheader("Inventory Analytics")
+        
+        # Create combined dataframe
+        combined_df = self.create_combined_df()
+        
+        # Visualization options
+        viz_option = st.selectbox(
+            "Select Visualization",
+            ["Status Distribution", "Stock Levels", "Expiry Timeline", "Location View"]
+        )
+        
+        if viz_option == "Status Distribution":
+            fig = px.pie(
+                combined_df, 
+                names='Status', 
+                title='Inventory Status Distribution',
+                color='Status',
+                color_discrete_map={
+                    'OK': 'green',
+                    'Low': 'orange',
+                    'Expired': 'red',
+                    'Damaged': 'red'
+                }
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        elif viz_option == "Stock Levels":
+            fig = px.bar(
+                combined_df,
+                x='Category',
+                y='Current',
+                color='Status',
+                title='Stock Levels by Category',
+                hover_data=['Item', 'Minimum'],
+                color_discrete_map={
+                    'OK': 'green',
+                    'Low': 'orange',
+                    'Expired': 'red',
+                    'Damaged': 'red'
+                }
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        elif viz_option == "Expiry Timeline":
+            chem_df = st.session_state.lab_inventory["chemicals"].copy()
+            chem_df['Expiry'] = pd.to_datetime(chem_df['Expiry'], errors='coerce')
+            chem_df = chem_df.dropna(subset=['Expiry'])
+            
+            if not chem_df.empty:
+                chem_df['Days Until Expiry'] = (chem_df['Expiry'] - pd.to_datetime('today')).dt.days
+                fig = px.scatter(
+                    chem_df,
+                    x='Expiry',
+                    y='Item',
+                    size='Current',
+                    color='Days Until Expiry',
+                    hover_data=['Minimum', 'Location'],
+                    title='Chemical Expiry Timeline'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("No chemicals with valid expiry dates found")
     
-    # Generate report button
-    if st.button("Generate Word Report"):
+    def display_alerts(self):
+        """Display inventory alerts"""
+        st.subheader("Inventory Alerts")
+        
+        # Chemical alerts
+        chem_df = st.session_state.lab_inventory["chemicals"]
+        low_stock = chem_df[chem_df["Status"] == "Low"]
+        expired = chem_df[chem_df["Status"] == "Expired"]
+        
+        if not low_stock.empty:
+            st.warning(f"🧪 {len(low_stock)} Chemicals Need Restocking")
+            st.dataframe(
+                low_stock[["ID", "Item", "Current", "Minimum", "Unit", "Location"]],
+                hide_index=True
+            )
+        
+        if not expired.empty:
+            st.error(f"⏳ {len(expired)} Expired Chemicals")
+            st.dataframe(
+                expired[["ID", "Item", "Expiry", "Location"]],
+                hide_index=True
+            )
+        
+        # Glassware alerts
+        glass_df = st.session_state.lab_inventory["glassware"]
+        damaged = glass_df[glass_df["Status"] == "Damaged"]
+        
+        if not damaged.empty:
+            st.error(f"🔧 {len(damaged)} Damaged Glassware Items")
+            st.dataframe(
+                damaged[["ID", "Item", "Comment", "Location"]],
+                hide_index=True
+            )
+        
+        # Equipment alerts
+        equip_df = st.session_state.lab_inventory["equipment"]
+        issues = equip_df[equip_df["Status"].str.contains("need", case=False)]
+        
+        if not issues.empty:
+            st.error(f"⚠️ {len(issues)} Equipment Issues")
+            st.dataframe(
+                issues[["ID", "Item", "Status", "Last Calibration"]],
+                hide_index=True
+            )
+        
+        if low_stock.empty and expired.empty and damaged.empty and issues.empty:
+            st.success("✅ No critical alerts at this time")
+    
+    def display_export(self):
+        """Export and email functionality"""
+        st.subheader("Export Inventory Data")
+        
+        # Export options
+        export_type = st.selectbox(
+            "Export Type",
+            ["Full Inventory", "Chemicals Only", "Restocking List", "Expiry Report"]
+        )
+        
+        format_type = st.selectbox(
+            "Format",
+            ["Word Document", "Excel", "CSV"]
+        )
+        
+        # Generate report
+        if st.button("Generate Report"):
+            if format_type == "Word Document":
+                self.export_word_report(export_type)
+            elif format_type == "Excel":
+                self.export_excel(export_type)
+            else:
+                self.export_csv(export_type)
+        
+        # Email functionality
+        st.subheader("Email Report")
+        with st.form("email_form"):
+            recipient = st.text_input("Recipient Email")
+            subject = st.text_input("Subject", value="Lab Inventory Report")
+            message = st.text_area("Message")
+            
+            if st.form_submit_button("Send Email"):
+                if not recipient:
+                    st.error("Please enter a recipient email")
+                else:
+                    try:
+                        self.send_email_report(recipient, subject, message, export_type)
+                        st.success("Email sent successfully!")
+                    except Exception as e:
+                        st.error(f"Failed to send email: {str(e)}")
+    
+    def export_word_report(self, report_type):
+        """Generate Word document report"""
         document = Document()
         
-        # Add title
+        # Add title and metadata
         document.add_heading('Lab Inventory Report', 0)
+        document.add_paragraph(f"Report Type: {report_type}")
+        document.add_paragraph(f"Generated on: {dt.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        document.add_paragraph(f"Generated by: {st.session_state.get('username', 'System')}")
         
-        # Add metadata
-        p = document.add_paragraph()
-        p.add_run('Date: ').bold = True
-        p.add_run(dt.datetime.now().strftime("%Y-%m-%d %H:%M"))
-        
-        p = document.add_paragraph()
-        p.add_run('Generated by: ').bold = True
-        p.add_run(st.session_state.username if 'username' in st.session_state else "System")
-        
-        # Add appropriate content based on report type
+        # Add content based on report type
         if report_type in ["Full Inventory", "Chemicals Only"]:
-            add_chemicals_to_doc(document, st.session_state.lab_inventory["chemicals"], include_comments)
+            self.add_chemicals_to_word(document)
         
-        if report_type in ["Full Inventory", "Glassware Only"]:
-            add_glassware_to_doc(document, st.session_state.lab_inventory["glassware"], include_comments)
-        
-        if report_type in ["Full Inventory", "Equipment Only"]:
-            add_equipment_to_doc(document, st.session_state.lab_inventory["equipment"], include_comments)
+        if report_type in ["Full Inventory"]:
+            self.add_glassware_to_word(document)
+            self.add_equipment_to_word(document)
         
         if report_type == "Restocking List":
-            add_restocking_list_to_doc(document)
+            self.add_restocking_list(document)
         
-        # Save the document to a BytesIO stream
+        if report_type == "Expiry Report":
+            self.add_expiry_report(document)
+        
+        # Save to BytesIO and offer download
         file_stream = BytesIO()
         document.save(file_stream)
         file_stream.seek(0)
         
-        # Download button
         st.download_button(
-            label="Download Word Document",
+            label="Download Word Report",
             data=file_stream,
-            file_name=f"lab_inventory_report_{dt.datetime.now().strftime('%Y%m%d')}.docx",
+            file_name=f"lab_inventory_{report_type.replace(' ', '_')}.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
-
-def add_chemicals_to_doc(doc, df, include_comments):
-    """Add chemicals section to Word document"""
-    doc.add_heading('Chemicals and Reagents', level=1)
     
-    table = doc.add_table(rows=1, cols=6)
-    table.style = 'Table Grid'
-    
-    # Header row
-    hdr_cells = table.rows[0].cells
-    hdr_cells[0].text = 'Item'
-    hdr_cells[1].text = 'Min Stock'
-    hdr_cells[2].text = 'Monthly Usage'
-    hdr_cells[3].text = 'Stock on Hand'
-    hdr_cells[4].text = 'Expiry Date'
-    if include_comments:
-        hdr_cells[5].text = 'Comment'
-    
-    # Add data rows
-    for _, row in df.iterrows():
-        row_cells = table.add_row().cells
-        row_cells[0].text = str(row['Item'])
-        row_cells[1].text = str(row['Minimum stock'])
-        row_cells[2].text = str(row['Monthly usage'])
-        row_cells[3].text = str(row['Stock on hand'])
-        row_cells[4].text = str(row['Expiry date']) if pd.notna(row['Expiry date']) else ""
-        if include_comments:
-            row_cells[5].text = str(row['Comment']) if pd.notna(row['Comment']) else ""
-    
-    doc.add_paragraph()
-
-def add_glassware_to_doc(doc, df, include_comments):
-    """Add glassware section to Word document"""
-    doc.add_heading('Glassware', level=1)
-    
-    table = doc.add_table(rows=1, cols=3 if include_comments else 2)
-    table.style = 'Table Grid'
-    
-    # Header row
-    hdr_cells = table.rows[0].cells
-    hdr_cells[0].text = 'Item'
-    hdr_cells[1].text = 'Quantity'
-    if include_comments:
-        hdr_cells[2].text = 'Comment'
-    
-    # Add data rows
-    for _, row in df.iterrows():
-        row_cells = table.add_row().cells
-        row_cells[0].text = str(row['Item'])
-        row_cells[1].text = str(row['Stock on hand'])
-        if include_comments:
-            row_cells[2].text = str(row['Comment']) if pd.notna(row['Comment']) else ""
-    
-    doc.add_paragraph()
-
-def add_equipment_to_doc(doc, df, include_comments):
-    """Add equipment section to Word document"""
-    doc.add_heading('Equipment', level=1)
-    
-    table = doc.add_table(rows=1, cols=4 if include_comments else 3)
-    table.style = 'Table Grid'
-    
-    # Header row
-    hdr_cells = table.rows[0].cells
-    hdr_cells[0].text = 'Equipment'
-    hdr_cells[1].text = 'Quantity'
-    hdr_cells[2].text = 'Status'
-    if include_comments:
-        hdr_cells[3].text = 'Comment'
-    
-    # Add data rows
-    for _, row in df.iterrows():
-        row_cells = table.add_row().cells
-        row_cells[0].text = str(row['Equipment'])
-        row_cells[1].text = str(row['Stock at hand'])
-        row_cells[2].text = str(row['Status'])
-        if include_comments:
-            row_cells[3].text = str(row['Comment']) if pd.notna(row['Comment']) else ""
-    
-    doc.add_paragraph()
-
-def add_restocking_list_to_doc(doc):
-    """Add restocking list to Word document"""
-    doc.add_heading('Restocking List', level=1)
-    doc.add_paragraph('Items that need to be reordered or require attention:')
-    
-    # Chemicals that are below minimum stock
-    chemicals = st.session_state.lab_inventory["chemicals"]
-    low_stock_chemicals = chemicals[chemicals["Stock on hand"] < chemicals["Minimum stock"]]
-    
-    if not low_stock_chemicals.empty:
-        doc.add_heading('Chemicals Below Minimum Stock', level=2)
-        table = doc.add_table(rows=1, cols=4)
-        table.style = 'Table Grid'
+    def send_email_report(self, recipient, subject, message, report_type):
+        """Send inventory report via email"""
+        # Create document
+        document = Document()
+        document.add_heading(subject, 0)
+        document.add_paragraph(message)
         
-        hdr_cells = table.rows[0].cells
-        hdr_cells[0].text = 'Item'
-        hdr_cells[1].text = 'Min Stock'
-        hdr_cells[2].text = 'Current Stock'
-        hdr_cells[3].text = 'Deficit'
+        # Add report content
+        if report_type in ["Full Inventory", "Chemicals Only"]:
+            self.add_chemicals_to_word(document)
         
-        for _, row in low_stock_chemicals.iterrows():
-            row_cells = table.add_row().cells
-            row_cells[0].text = str(row['Item'])
-            row_cells[1].text = str(row['Minimum stock'])
-            row_cells[2].text = str(row['Stock on hand'])
-            row_cells[3].text = str(row['Minimum stock'] - row['Stock on hand'])
-    
-    # Expiring soon chemicals
-    expiring_chemicals = chemicals[
-        chemicals["Expiry date"].apply(
-            lambda x: is_expiring_soon(x) if pd.notna(x) else False
+        # Create email message
+        msg = MIMEMultipart()
+        msg['From'] = st.secrets["email"]["username"]
+        msg['To'] = recipient
+        msg['Subject'] = subject
+        
+        # Add text and attachment
+        msg.attach(MIMEText(message, 'plain'))
+        
+        file_stream = BytesIO()
+        document.save(file_stream)
+        file_stream.seek(0)
+        
+        part = MIMEBase('application', 'octet-stream')
+        part.set_payload(file_stream.read())
+        encoders.encode_base64(part)
+        part.add_header(
+            'Content-Disposition',
+            f'attachment; filename="lab_inventory_{report_type.replace(' ', '_')}.docx"'
         )
-    ]
-    
-    if not expiring_chemicals.empty:
-        doc.add_heading('Chemicals Expiring Soon (within 3 months)', level=2)
-        table = doc.add_table(rows=1, cols=3)
-        table.style = 'Table Grid'
+        msg.attach(part)
         
-        hdr_cells = table.rows[0].cells
-        hdr_cells[0].text = 'Item'
-        hdr_cells[1].text = 'Expiry Date'
-        hdr_cells[2].text = 'Current Stock'
-        
-        for _, row in expiring_chemicals.iterrows():
-            row_cells = table.add_row().cells
-            row_cells[0].text = str(row['Item'])
-            row_cells[1].text = str(row['Expiry date'])
-            row_cells[2].text = str(row['Stock on hand'])
+        # Send email
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(
+                st.secrets["email"]["username"],
+                st.secrets["email"]["password"]
+            )
+            server.send_message(msg)
     
-    # Add other sections for glassware and equipment as needed
+    def create_combined_df(self):
+        """Create combined dataframe of all inventory"""
+        chem = st.session_state.lab_inventory["chemicals"].copy()
+        glass = st.session_state.lab_inventory["glassware"].copy()
+        equip = st.session_state.lab_inventory["equipment"].copy()
+        
+        # Standardize columns
+        chem["Type"] = "Chemical"
+        glass["Type"] = "Glassware"
+        equip["Type"] = "Equipment"
+        
+        # Combine relevant columns
+        combined = pd.concat([
+            chem[["ID", "Item", "Type", "Category", "Current", "Minimum", "Unit", "Status", "Location"]],
+            glass[["ID", "Item", "Type", "Category", "Current", "Unit", "Status", "Location"]],
+            equip[["ID", "Item", "Type", "Category", "Current", "Unit", "Status", "Location"]]
+        ])
+        
+        return combined.fillna("")
+
+# Main app execution
+if __name__ == "__main__":
+    inventory = LabInventory()
+    inventory.display_main_interface()
