@@ -26,6 +26,7 @@ from compliance import display_compliance_report_page
 from prediction import display_prediction_page
 from anomaly import display_anomaly_detection_page
 from handover import display_shift_handover_page
+from lab_inventory import display_lab_inventory_page
 
 # Page configuration
 st.set_page_config(
@@ -148,7 +149,7 @@ else:
     app_mode = st.sidebar.selectbox(
         "Navigation",
         ["Dashboard", "Data Entry", "Visualizations", "SPC Analysis", "Process Capability", "Trend Prediction", 
-         "Anomaly Detection", "Shift Handover", "Reports", "Compliance Reports", "User Management"]
+         "Anomaly Detection", "Shift Handover", "Lab Inventory", "Reports", "Compliance Reports", "User Management"]
     )
     
     if st.sidebar.button("Logout"):
@@ -341,7 +342,11 @@ else:
     # Shift Handover page
     elif app_mode == "Shift Handover":
         display_shift_handover_page()
-    
+
+    # Lab Inventory Page
+    elif app_mode == "Lab Inventory":
+        display_lab_inventory_page()
+
     # Reports page
     elif app_mode == "Reports":
         st.title("Quality Assurance Reports")
