@@ -1,4 +1,20 @@
+import os
+if __name__ == '__main__':
+    os.environ['STREAMLIT_SERVER_PORT'] = '8501'
+    os.environ['STREAMLIT_SERVER_ADDRESS'] = 'localhost'
+    os.environ['STREAMLIT_BROWSER_GATHER_USAGE_STATS'] = 'false'
+    os.environ['BROWSER'] = 'true'
+
 import streamlit as st
+
+# Page configuration
+st.set_page_config(
+    page_title="Beverage QA Tracker",
+    page_icon="🧪",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
 import pandas as pd
 import datetime as dt
 from auth import authenticate_user, create_user_if_not_exists, logout
@@ -27,14 +43,6 @@ from prediction import display_prediction_page
 from anomaly import display_anomaly_detection_page
 from handover import display_shift_handover_page
 from lab_inventory import display_lab_inventory_page
-
-# Page configuration
-st.set_page_config(
-    page_title="Beverage QA Tracker",
-    page_icon="🧪",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
 
 # Initialize database
 initialize_database()
