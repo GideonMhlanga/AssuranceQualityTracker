@@ -1,7 +1,7 @@
 import os
 if __name__ == '__main__':
-    os.environ['STREAMLIT_SERVER_PORT'] = '5000'
-    os.environ['STREAMLIT_SERVER_ADDRESS'] = 'localhost'
+    os.environ['STREAMLIT_SERVER_PORT'] = '8501'
+    os.environ['STREAMLIT_SERVER_ADDRESS'] = '0.0.0.0'
     os.environ['STREAMLIT_BROWSER_GATHER_USAGE_STATS'] = 'false'
     os.environ['BROWSER'] = 'true'
 

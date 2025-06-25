@@ -13,8 +13,7 @@ from email.mime.text import MIMEText
 from email import encoders
 from sqlalchemy import text, Date, Numeric
 from database import get_conn
-from datetime import date, datetime
-
+from datetime import date, datetime, timedelta
 
 # Configuration
 SMTP_SERVER = "smtp.gmail.com"
@@ -70,7 +69,6 @@ def style_inventory_rows(row):
     """Apply styling to inventory rows based on status"""
     styles = [''] * len(row)
     
-    # Ensure we have a status column to check
     if 'status' in row.index:
         if row['status'] == 'Low':
             styles = ['background-color: #FFF3CD'] * len(row)
@@ -81,24 +79,52 @@ def style_inventory_rows(row):
         elif row['status'] in ['Needs service', 'In repair']:
             styles = ['background-color: #FFF3CD'] * len(row)
 
-    # Format numeric values to 2 decimal places
-    if 'current' in row.index and pd.notna(row['current']):
-        row['current'] = f"{float(row['current']):.2f}"
-    if 'minimum' in row.index and pd.notna(row['minimum']):
-        row['minimum'] = f"{float(row['minimum']):.2f}"
-    if 'monthly' in row.index and pd.notna(row['monthly']):
-        row['monthly'] = f"{float(row['monthly']):.2f}"
+    numeric_cols = ['current', 'minimum', 'monthly']
+    for col in numeric_cols:
+        if col in row.index and pd.notna(row[col]) and str(row[col]).strip():
+            try:
+                row[col] = f"{float(row[col]):.2f}"
+            except (ValueError, TypeError):
+                row[col] = ""
     
     return styles
 
 def calculate_months_of_stock(row):
     """Calculate months of remaining stock"""
     try:
-        if pd.notna(row['monthly']) and float(row['monthly']) > 0:
-            return float(row['current']) / float(row['monthly'])
+        if (pd.notna(row.get('monthly')) and pd.notna(row.get('current'))) and \
+           (str(row['monthly']).strip() and str(row['current']).strip()):
+            monthly = float(row['monthly'])
+            current = float(row['current'])
+            if monthly > 0:
+                return current / monthly
     except (TypeError, ValueError, KeyError):
         pass
     return None
+
+def generate_unique_id(category):
+    """Generate a unique ID for any inventory category"""
+    prefix = {
+        "chemicals": "CHEM",
+        "glassware": "GLAS",
+        "equipment": "EQUIP"
+    }.get(category, "ITEM")
+    
+    conn = get_conn()
+    try:
+        result = conn.execute(
+            text(f"SELECT MAX(id) FROM {category}")
+        ).fetchone()
+        
+        max_id = result[0] if result[0] else f"{prefix}-000"
+        num_part = int(max_id.split('-')[1]) + 1
+        return f"{prefix}-{num_part:03d}"
+    except Exception as e:
+        st.error(f"Error generating ID: {e}")
+        return f"{prefix}-{len(st.session_state.lab_inventory[category])+1:03d}"
+    finally:
+        if conn:
+            conn.close()
 
 # ======================
 # Database Functions
@@ -161,9 +187,25 @@ def init_inventory_tables():
                 """
             ]
             
-            # Execute each table creation query
             for query in table_creation_queries:
                 conn.execute(text(query))
+            
+            # Add sequences for ID generation
+            for category in ["chemicals", "glassware", "equipment"]:
+                conn.execute(text(f"""
+                    CREATE SEQUENCE IF NOT EXISTS {category}_id_seq;
+                    ALTER TABLE {category} ALTER COLUMN id SET DEFAULT 
+                        CASE 
+                            WHEN '{category}' = 'chemicals' THEN 'CHEM-' || LPAD(nextval('{category}_id_seq')::text, 3, '0')
+                            WHEN '{category}' = 'glassware' THEN 'GLAS-' || LPAD(nextval('{category}_id_seq')::text, 3, '0')
+                            WHEN '{category}' = 'equipment' THEN 'EQUIP-' || LPAD(nextval('{category}_id_seq')::text, 3, '0')
+                        END;
+                """))
+                # Initialize sequence values
+                conn.execute(text(f"""
+                    SELECT setval('{category}_id_seq', 
+                        COALESCE((SELECT MAX(SUBSTRING(id FROM '[0-9]+$')::int) FROM {category}), 0) + 1);
+                """))
             
             # Check if Months Stock column exists and has correct type
             result = conn.execute(text("""
@@ -172,7 +214,6 @@ def init_inventory_tables():
                 WHERE table_name='chemicals' AND column_name='Months Stock'
             """)).fetchone()
             
-            # Only alter if column doesn't exist or has wrong type
             if not result or result[0] != 'numeric' or result[1] != 10 or result[2] != 2:
                 conn.execute(text("""
                     ALTER TABLE chemicals 
@@ -235,39 +276,34 @@ def save_to_db(category, df):
     conn = get_conn()
     if conn:
         try:
-            # Make a copy to avoid modifying the original
             df_to_save = df.copy()
             
-            # Convert dates if this is the chemicals table
             if category == "chemicals" and 'expiry' in df_to_save.columns:
                 df_to_save['expiry'] = pd.to_datetime(
                     df_to_save['expiry'], 
                     format='%Y-%m-%d', 
                     errors='coerce'
                 )
-                # Drop rows with invalid dates
                 df_to_save = df_to_save[~df_to_save['expiry'].isna()]
             
-            # Round numeric columns to 2 decimal places
             if category == "chemicals":
                 numeric_cols = ['minimum', 'current', 'monthly', 'Months Stock']
                 for col in numeric_cols:
                     if col in df_to_save.columns:
-                        df_to_save[col] = df_to_save[col].apply(
-                            lambda x: round(float(x), 2) if pd.notna(x) else None
+                        df_to_save[col] = (
+                            pd.to_numeric(df_to_save[col], errors='coerce')
+                            .round(2)
+                            .replace({np.nan: None})
                         )
-            
-            # Ensure Months Stock is calculated if missing
+
             if category == "chemicals" and 'Months Stock' not in df_to_save.columns:
                 df_to_save['Months Stock'] = df_to_save.apply(
                     lambda row: round(calculate_months_of_stock(row), 2), 
                     axis=1
                 )
             
-            # Delete existing data
             conn.execute(text(f"DELETE FROM {category}"))
             
-            # Insert new data
             df_to_save.to_sql(
                 category, 
                 conn, 
@@ -291,34 +327,48 @@ def save_to_db(category, df):
 
 def insert_item(category, item_data):
     """Insert a new item into the specified category with proper date handling"""
-    conn = get_conn()
-    if conn:
-        try:
-            # Validate date format if needed
-            if category == "chemicals" and 'expiry' in item_data:
-                if not validate_date(item_data['expiry']):
-                    st.error("Invalid date format. Please use YYYY-MM-DD format.")
-                    return None
-            
-            columns = ', '.join(item_data.keys())
-            placeholders = ', '.join([':%s' % k for k in item_data.keys()])
-            
-            query = text(f"""
-                INSERT INTO {category} ({columns})
-                VALUES ({placeholders})
-                RETURNING *
-            """)
-            
-            result = conn.execute(query, item_data).fetchone()
-            conn.commit()
-            return result
-        except Exception as e:
-            conn.rollback()
-            st.error(f"Error inserting item: {e}")
+    conn = None
+    try:
+        conn = get_conn()
+        if not conn:
+            st.error("Database connection failed")
             return None
-        finally:
+
+        if category == "chemicals" and "Months Stock" not in item_data:
+            item_data["Months Stock"] = calculate_months_of_stock(item_data)
+
+        columns = []
+        placeholders = []
+        params = {}
+        
+        for col, val in item_data.items():
+            if ' ' in col:
+                columns.append(f'"{col}"')
+            else:
+                columns.append(col)
+            
+            param_name = col.replace(' ', '_')
+            params[param_name] = val
+            placeholders.append(f':{param_name}')
+
+        query = text(f"""
+            INSERT INTO {category} ({', '.join(columns)})
+            VALUES ({', '.join(placeholders)})
+            RETURNING *
+        """)
+
+        result = conn.execute(query, params).fetchone()
+        conn.commit()
+        return result
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        st.error(f"Database operation failed: {e}")
+        return None
+    finally:
+        if conn:
             conn.close()
-    return None
 
 # ======================
 # Core Functions
@@ -327,25 +377,18 @@ def insert_item(category, item_data):
 def initialize_inventory_data():
     """Initialize inventory data structure with PostgreSQL"""
     try:
-        # First initialize tables
         init_inventory_tables()
-        
-        # Then load data from database
         st.session_state.lab_inventory = load_from_db()
         
-        # Check if we need to load sample data
         if all(df.empty for df in st.session_state.lab_inventory.values()):
             st.warning("No inventory data found - loading sample data...")
             load_sample_data()
             
-            # Save sample data to database
             for category, df in st.session_state.lab_inventory.items():
                 save_to_db(category, df)
             
-            # Reload from database to ensure consistency
             st.session_state.lab_inventory = load_from_db()
         
-        # Ensure status is calculated for all items
         check_restock_status()
         
     except Exception as e:
@@ -355,7 +398,6 @@ def initialize_inventory_data():
 
 def load_sample_data():
     """Load sample inventory data with YYYY-MM-DD date formats"""
-    # Sample chemicals with all required fields
     sample_chemicals = [
         {
             "id": "CHEM-001", 
@@ -374,108 +416,120 @@ def load_sample_data():
         },
         {
             "id": "CHEM-002", 
-            "item": "0.1N Sodium Hydroxide", 
-            "category": "Base", 
-            "minimum": 5.0, 
-            "current": 3.7, 
-            "monthly": 1.2, 
-            "unit": "L", 
-            "expiry": "2025-05-01", 
-            "location": "Cabinet B2", 
+            "item": "Sodium Thiosulfate", 
+            "category": "Reagent", 
+            "minimum": 500.0, 
+            "current": 1200.0, 
+            "monthly": 250.0, 
+            "unit": "grams", 
+            "expiry": "2026-05-15", 
+            "location": "Shelf B2", 
             "supplier": "Fisher Scientific", 
-            "comment": "Corrosive", 
+            "comment": "Keep in amber bottle", 
             "status": "OK",
-            "Months Stock": 3.08
+            "Months Stock": 4.8
         },
         {
-            "id": "CHEM-003",
-            "item": "Ethanol 95%",
-            "category": "Solvent",
-            "minimum": 10.0,
-            "current": 15.5,
-            "monthly": 5.0,
-            "unit": "L",
-            "expiry": "2026-12-31",
-            "location": "Flammable Cabinet",
-            "supplier": "VWR",
-            "comment": "Flammable liquid",
+            "id": "CHEM-003", 
+            "item": "Hydrochloric Acid", 
+            "category": "Acid", 
+            "minimum": 1000.0, 
+            "current": 2500.0, 
+            "monthly": 500.0, 
+            "unit": "mL", 
+            "expiry": "2029-12-31", 
+            "location": "Acid Cabinet", 
+            "supplier": "VWR", 
+            "comment": "Concentrated - handle with care", 
             "status": "OK",
-            "Months Stock": 3.1
+            "Months Stock": 5.0
+        },
+        {
+            "id": "CHEM-004", 
+            "item": "Phenolphthalein", 
+            "category": "Indicator", 
+            "minimum": 50.0, 
+            "current": 25.0, 
+            "monthly": 10.0, 
+            "unit": "mL", 
+            "expiry": "2023-11-30", 
+            "location": "Shelf C3", 
+            "supplier": "Sigma-Aldrich", 
+            "comment": "Expired - needs disposal", 
+            "status": "Expired",
+            "Months Stock": 2.5
         }
     ]
-
-    # Sample glassware with all required fields
+    
     sample_glassware = [
         {
             "id": "GLAS-001", 
-            "item": "1000ml volumetric flask", 
+            "item": "100 mL Volumetric Flask", 
             "category": "Volumetric", 
-            "current": 5, 
+            "current": 12, 
             "unit": "pieces", 
-            "location": "Cabinet 3", 
-            "comment": "", 
+            "location": "Cabinet 1", 
+            "comment": "Class A", 
             "status": "OK"
         },
         {
             "id": "GLAS-002", 
-            "item": "50ml burette", 
-            "category": "Measuring", 
-            "current": 2, 
+            "item": "50 mL Burette", 
+            "category": "Volumetric", 
+            "current": 6, 
             "unit": "pieces", 
-            "location": "Drawer 1", 
-            "comment": "1 needs repair", 
+            "location": "Cabinet 2", 
+            "comment": "With PTFE stopcock", 
             "status": "Damaged"
         },
         {
-            "id": "GLAS-003",
-            "item": "250ml beaker",
-            "category": "Container",
-            "current": 12,
-            "unit": "pieces",
-            "location": "Shelf B2",
-            "comment": "",
+            "id": "GLAS-003", 
+            "item": "250 mL Beaker", 
+            "category": "Measuring", 
+            "current": 24, 
+            "unit": "pieces", 
+            "location": "Shelf D4", 
+            "comment": "", 
             "status": "OK"
         }
     ]
     
-    # Sample equipment with all required fields
     sample_equipment = [
         {
             "id": "EQUIP-001", 
-            "item": "pH meter", 
+            "item": "pH Meter", 
             "category": "Instrument", 
-            "current": 1, 
+            "current": 3, 
             "unit": "units", 
-            "location": "Bench 2", 
+            "location": "Bench 1", 
             "status": "Working", 
-            "last_calibration": "2024-01-01", 
-            "comment": ""
+            "last_calibration": "2023-10-15", 
+            "comment": "Calibration due in 3 months"
         },
         {
             "id": "EQUIP-002", 
-            "item": "Analytical balance", 
+            "item": "Analytical Balance", 
             "category": "Instrument", 
             "current": 2, 
             "unit": "units", 
-            "location": "Bench 1", 
+            "location": "Balance Room", 
             "status": "Needs service", 
-            "last_calibration": "2024-03-01", 
-            "comment": "Annual maintenance due"
+            "last_calibration": "2023-09-01", 
+            "comment": "Drifting - needs technician"
         },
         {
-            "id": "EQUIP-003",
-            "item": "Centrifuge",
-            "category": "Machine",
-            "current": 1,
-            "unit": "units",
-            "location": "Lab Station 3",
-            "status": "Working",
-            "last_calibration": "2024-02-15",
-            "comment": "RPM needs verification"
+            "id": "EQUIP-003", 
+            "item": "Hot Plate", 
+            "category": "Device", 
+            "current": 5, 
+            "unit": "units", 
+            "location": "Bench 3", 
+            "status": "Working", 
+            "last_calibration": "2023-08-20", 
+            "comment": ""
         }
     ]
     
-    # Create DataFrames with all required columns
     st.session_state.lab_inventory = {
         "chemicals": pd.DataFrame(sample_chemicals),
         "glassware": pd.DataFrame(sample_glassware),
@@ -483,466 +537,200 @@ def load_sample_data():
     }
 
 def check_restock_status():
-    """Check and update inventory status"""
-    try:
-        chem_df = st.session_state.lab_inventory["chemicals"].copy()
+    """Check and update status for all inventory items"""
+    today = datetime.now().date()
+    
+    # Update chemicals status
+    if "chemicals" in st.session_state.lab_inventory:
+        df = st.session_state.lab_inventory["chemicals"].copy()
         
-        if not chem_df.empty:
-            # Initialize status column if it doesn't exist
-            if 'status' not in chem_df.columns:
-                chem_df['status'] = 'OK'
-            
-            if not pd.api.types.is_datetime64_any_dtype(chem_df["expiry"]):
-                chem_df["expiry"] = pd.to_datetime(chem_df["expiry"], errors='coerce')
-            
-            chem_df["status"] = np.where(
-                chem_df["current"] < chem_df["minimum"],
-                "Low",
-                "OK"
+        # Convert expiry to datetime if it's not already
+        if 'expiry' in df.columns and df['expiry'].dtype == object:
+            df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce').dt.date
+        
+        # Calculate status based on conditions
+        conditions = [
+            (df['current'] <= df['minimum'] * 0.2) & (df['current'] > 0),
+            df['current'] <= 0,
+            (df['expiry'] < today) if 'expiry' in df.columns else False,
+            (df['current'] <= df['minimum'] * 0.5) & (df['current'] > df['minimum'] * 0.2)
+        ]
+        choices = ["Critical", "Out of Stock", "Expired", "Low"]
+        
+        df['status'] = np.select(conditions, choices, default="OK")
+        
+        # Calculate months of stock
+        if 'monthly' in df.columns and 'current' in df.columns:
+            df['Months Stock'] = df.apply(
+                lambda row: round(calculate_months_of_stock(row), 2) if pd.notna(row['monthly']) and float(row['monthly']) > 0 else None,
+                axis=1
             )
-            
-            today = pd.to_datetime(dt.datetime.now().date())
-            chem_df.loc[(chem_df["expiry"] < today) & (~chem_df["expiry"].isna()), "status"] = "Expired"
-            
-            st.session_state.lab_inventory["chemicals"] = chem_df
-    except Exception as e:
-        st.error(f"Error checking restock status: {e}")
         
-def create_combined_df():
-    """Create combined dataframe of all inventory with proper column handling"""
-    chem = st.session_state.lab_inventory["chemicals"].copy()
-    glass = st.session_state.lab_inventory["glassware"].copy()
-    equip = st.session_state.lab_inventory["equipment"].copy()
+        st.session_state.lab_inventory["chemicals"] = df
     
-    # Standardize columns
-    chem["type"] = "Chemical"
-    glass["type"] = "Glassware"
-    equip["type"] = "Equipment"
+    # Update glassware status
+    if "glassware" in st.session_state.lab_inventory:
+        df = st.session_state.lab_inventory["glassware"].copy()
+        if 'status' not in df.columns:
+            df['status'] = "OK"
+        st.session_state.lab_inventory["glassware"] = df
     
-    # Define all possible columns we might want to include
-    all_columns = [
-        "id", "item", "type", "category", "current", 
-        "minimum", "monthly", "unit", "status", "location"
-    ]
-    
-    # Function to get only existing columns from a dataframe
-    def get_existing_columns(df, columns):
-        return [col for col in columns if col in df.columns]
-    
-    # Get existing columns for each dataframe
-    chem_cols = get_existing_columns(chem, all_columns)
-    glass_cols = get_existing_columns(glass, all_columns)
-    equip_cols = get_existing_columns(equip, all_columns)
-    
-    # Combine relevant columns
-    combined = pd.concat([
-        chem[chem_cols],
-        glass[glass_cols],
-        equip[equip_cols]
-    ])
-    
-    # Add default values for any missing critical columns
-    if 'status' not in combined.columns:
-        combined['status'] = 'OK'
-    if 'current' not in combined.columns:
-        combined['current'] = 0
-    if 'unit' not in combined.columns:
-        combined['unit'] = 'units'
-    
-    # Add months of stock for chemicals if possible
-    if 'monthly' in combined.columns and 'current' in combined.columns:
-        combined['Months Stock'] = combined.apply(
-            lambda row: calculate_months_of_stock(row) if row['type'] == 'Chemical' else None, 
-            axis=1
-        )
-    
-    return combined.fillna("")
+    # Update equipment status
+    if "equipment" in st.session_state.lab_inventory:
+        df = st.session_state.lab_inventory["equipment"].copy()
+        if 'status' not in df.columns:
+            df['status'] = "Working"
+        st.session_state.lab_inventory["equipment"] = df
 
 # ======================
-# UI Functions
+# Inventory Management
 # ======================
-
-def display_lab_inventory_page():
-    """Main inventory management interface"""
-    st.title("🔬 Laboratory Inventory Management System")
-    
-    # Initialize session state
-    if 'lab_inventory' not in st.session_state:
-        initialize_inventory_data()
-    
-    # Main tabs
-    tabs = st.tabs(["📊 Dashboard", "📦 Inventory", "📈 Analytics", "⚠️ Alerts", "📤 Export"])
-    
-    with tabs[0]:
-        display_dashboard()
-    with tabs[1]:
-        display_inventory_management()
-    with tabs[2]:
-        display_analytics()
-    with tabs[3]:
-        display_alerts()
-    with tabs[4]:
-        display_export()
-
-def display_dashboard():
-    """Display inventory dashboard"""
-    st.title("🔬 Laboratory Inventory Management System")
-    
-    # Initialize session state if not already done
-    if 'lab_inventory' not in st.session_state:
-        initialize_inventory_data()
-    
-    st.subheader("Inventory Overview")
-    
-    try:
-        # Calculate metrics
-        chem_stats = calculate_category_stats("chemicals")
-        glass_stats = calculate_category_stats("glassware")
-        equip_stats = calculate_category_stats("equipment")
-        
-        # Display metrics
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("🧪 Chemicals", 
-                    f"{chem_stats['total']} items",
-                    f"{chem_stats['low']} low, {chem_stats['expired']} expired")
-        with col2:
-            st.metric("🔍 Glassware", 
-                    f"{glass_stats['total']} items",
-                    f"{glass_stats['damaged']} damaged")
-        with col3:
-            st.metric("⚙️ Equipment", 
-                    f"{equip_stats['total']} items",
-                    f"{equip_stats['issues']} with issues")
-        
-        # Display complete inventory list
-        st.subheader("Complete Inventory List")
-        combined_df = create_combined_df()
-        
-        if combined_df.empty:
-            st.error("Inventory is empty - please check database connection")
-        else:
-            # Reset index to ensure uniqueness and convert to styled DataFrame
-            styled_df = (
-                combined_df
-                .reset_index(drop=True)  # Ensure unique index
-                .style
-                .apply(style_inventory_rows, axis=1)
-            )
-            
-            st.dataframe(
-                styled_df,
-                use_container_width=True,
-                height=400
-            )
-            
-    except Exception as e:
-        st.error(f"Error displaying dashboard: {str(e)}")
-        st.button("Reload Data", on_click=initialize_inventory_data)
-
-def display_inventory_management():
-    """Inventory management interface"""
-    st.subheader("Manage Inventory")
-    
-    category = st.selectbox(
-        "Select Category",
-        ["Chemicals", "Glassware", "Equipment"],
-        key="inventory_category"
-    )
-    
-    if category == "Chemicals":
-        manage_chemicals()
-    elif category == "Glassware":
-        manage_glassware()
-    else:
-        manage_equipment()
 
 def manage_chemicals():
-    """Chemical inventory management with enhanced date handling and validation"""
-    # Load and prepare data
+    """Chemical inventory management"""
     df = st.session_state.lab_inventory["chemicals"].copy()
     
-    # Convert expiry dates to consistent YYYY-MM-DD string format
-    df = normalize_expiry_dates(df)
-    
-    # Calculate months of stock
-    df['Months Stock'] = df.apply(calculate_months_of_stock, axis=1)
-    
-    # Add new chemical form
-    add_new_chemical_form(df)
-    
-    # Edit existing chemicals
-    edit_existing_chemicals(df)
-
-def normalize_expiry_dates(df):
-    """Ensure expiry dates are in YYYY-MM-DD string format"""
-    if not df.empty and 'expiry' in df.columns:
-        try:
-            if pd.api.types.is_datetime64_any_dtype(df['expiry']):
-                df['expiry'] = df['expiry'].dt.strftime('%Y-%m-%d')
-            else:
-                # Try parsing any date format and convert to YYYY-MM-DD
-                df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce').dt.strftime('%Y-%m-%d')
-        except Exception as e:
-            st.error(f"Error processing expiry dates: {str(e)}")
-    return df
-
-def add_new_chemical_form(df):
-    """Form to add new chemicals with validation"""
     with st.expander("➕ Add New Chemical", expanded=False):
-        with st.form("add_chemical_form", clear_on_submit=True):
+        with st.form("add_chemical_form"):
             cols = st.columns([1, 2, 1])
-            
-            with cols[0]:  # Identification
-                new_id = generate_chemical_id(df)
+            with cols[0]:
+                new_id = generate_unique_id("chemicals")
                 st.text_input("ID", value=new_id, disabled=True)
-                item_name = st.text_input("Item Name*", key="new_chem_name")
-                category = st.selectbox("Category*", INVENTORY_CATEGORIES["chemicals"])
-            
-            with cols[1]:  # Stock information
-                min_stock = st.number_input("Minimum Stock*", min_value=0.0, step=0.1, format="%.2f")
-                monthly_usage = st.number_input("Monthly Usage*", min_value=0.0, step=1.0, format="%.2f")
-                current_stock = st.number_input("Current Stock*", min_value=0.0, step=0.1, format="%.2f")
-                unit = st.selectbox("Unit*", ["g", "kg", "L", "mL", "tablets", "bottles", "satchets", "pieces"])
-            
-            with cols[2]:  # Additional info
-                expiry = st.date_input(
-                    "Expiry Date*",
-                    min_value=date.today(),  # This is where it goes
-                    help="Select expiry date from calendar"
-                ).strftime('%Y-%m-%d')
-                location = st.text_input("Storage Location*")
+                item_name = st.text_input("Item Name", key="new_chem_name")
+                category = st.selectbox("Category", INVENTORY_CATEGORIES["chemicals"])
+            with cols[1]:
+                minimum_stock = st.number_input("Minimum Stock", min_value=0.0, step=0.1, format="%.2f")
+                current_stock = st.number_input("Current Stock", min_value=0.0, step=0.1, format="%.2f")
+                monthly_usage = st.number_input("Monthly Usage", min_value=0.0, step=0.1, format="%.2f")
+                unit = st.selectbox("Unit", ["g", "kg", "mL", "L", "tablets", "bottles"])
+            with cols[2]:
+                expiry_date = st.text_input("Expiry Date (YYYY-MM-DD)", placeholder="2025-12-31")
+                location = st.text_input("Storage Location")
                 supplier = st.text_input("Supplier")
+                comment = st.text_input("Comments")
             
-            submitted = st.form_submit_button("Add Chemical")
-            
-            if submitted:
-                if not all([item_name, category, min_stock, monthly_usage, current_stock, unit, location]):
-                    st.error("Please fill all required fields (marked with *)")
+            if st.form_submit_button("Add Chemical"):
+                if expiry_date and not validate_date(expiry_date):
+                    st.error("Invalid date format. Please use YYYY-MM-DD format.")
                     st.stop()
                 
-                if is_duplicate_item(df, item_name):
-                    st.error(f"An item with the name '{item_name}' already exists")
-                    st.stop()
-                
-                add_chemical_to_inventory(df, new_id, {
-                    "item": item_name,
-                    "category": category,
-                    "minimum": min_stock,
-                    "current": current_stock,
-                    "monthly": monthly_usage,
-                    "unit": unit,
-                    "expiry": expiry,
-                    "location": location,
-                    "supplier": supplier,
-                    "comment": "",
-                    "status": "Low" if current_stock < min_stock else "OK"
-                })
-
-def generate_chemical_id(df):
-    """Generate a new chemical ID in CHEM-XXX format"""
-    return f"CHEM-{len(df)+1:03d}"
-
-def is_duplicate_item(df, item_name):
-    """Check if item name already exists (case-insensitive)"""
-    return item_name.lower() in df['item'].str.lower().tolist()
-
-def add_chemical_to_inventory(df, new_id, item_data):
-    """Add new chemical to inventory and refresh data"""
-    item_data["id"] = new_id
-    result = insert_item("chemicals", item_data)
-    if result:
-        st.session_state.lab_inventory["chemicals"] = pd.read_sql(
-            text("SELECT * FROM chemicals"), 
-            get_conn()
-        )
-        st.success(f"Added {item_data['item']} to inventory")
-        st.rerun()
-
-def edit_existing_chemicals(df):
-    """Edit existing chemicals with data editor including styling and proper numeric handling"""
+                existing_items = df['item'].str.lower().tolist()
+                if item_name.lower() in existing_items:
+                    st.error(f"A chemical with the name '{item_name}' already exists in Inventory!")
+                else:
+                    new_item = {
+                        "id": new_id,
+                        "item": item_name,
+                        "category": category,
+                        "minimum": minimum_stock,
+                        "current": current_stock,
+                        "monthly": monthly_usage,
+                        "unit": unit,
+                        "expiry": expiry_date if expiry_date else None,
+                        "location": location,
+                        "supplier": supplier,
+                        "comment": comment,
+                        "status": "OK"
+                    }
+                    
+                    # Calculate months of stock
+                    if monthly_usage > 0:
+                        new_item["Months Stock"] = round(current_stock / monthly_usage, 2)
+                    
+                    # Double-check ID doesn't exist
+                    conn = get_conn()
+                    if conn:
+                        existing_id = conn.execute(
+                            text("SELECT id FROM chemicals WHERE id = :id"),
+                            {"id": new_id}
+                        ).fetchone()
+                        
+                        if existing_id:
+                            st.error(f"ID {new_id} already exists! Generating new ID...")
+                            new_id = generate_unique_id("chemicals")
+                            new_item["id"] = new_id
+                    
+                    result = insert_item("chemicals", new_item)
+                    if result:
+                        st.session_state.lab_inventory["chemicals"] = pd.read_sql(
+                            text("SELECT * FROM chemicals"), 
+                            get_conn()
+                        )
+                        st.success(f"Added {item_name} to inventory")
+                        st.rerun()
+    
     st.subheader("Current Chemical Inventory")
-    
-    # Make a working copy and ensure 'expiry' column exists
-    editable_df = df.copy()
-    
-    # Initialize 'expiry' column if it doesn't exist
-    if 'expiry' not in editable_df.columns:
-        editable_df['expiry'] = pd.NaT
-    
-    # Convert expiry to datetime, handling errors
-    try:
-        editable_df['expiry'] = pd.to_datetime(editable_df['expiry'], errors='coerce')
-    except Exception as e:
-        st.error(f"Error processing expiry dates: {str(e)}")
-        editable_df['expiry'] = pd.NaT
-    
-    # Calculate and round Months Stock to 2 decimal places
-    editable_df['Months Stock'] = editable_df.apply(
-        lambda row: round(calculate_months_of_stock(row), 2) 
-        if calculate_months_of_stock(row) is not None 
-        else None,
-        axis=1
-    )
-    
-    # Round numeric columns to 2 decimal places
-    numeric_cols = ['minimum', 'current', 'monthly']
-    for col in numeric_cols:
-        if col in editable_df.columns:
-            editable_df[col] = editable_df[col].apply(
-                lambda x: round(float(x), 2) if pd.notna(x) else None
-            )
-    
-    # Configure columns for editing
-    column_config = {
-        "item": st.column_config.TextColumn("Item Name", required=True),
-        "category": st.column_config.SelectboxColumn(
-            "Category",
-            options=INVENTORY_CATEGORIES["chemicals"],
-            required=True
-        ),
-        "minimum": st.column_config.NumberColumn(
-            "Minimum Stock", 
-            required=True,
-            format="%.2f",
-            step=0.01
-        ),
-        "current": st.column_config.NumberColumn(
-            "Current Stock",
-            required=True,
-            format="%.2f",
-            step=0.01
-        ),
-        "monthly": st.column_config.NumberColumn(
-            "Monthly Usage",
-            required=True,
-            format="%.2f",
-            step=0.01
-        ),
-        "unit": st.column_config.SelectboxColumn(
-            "Unit",
-            options=["g", "kg", "L", "mL", "tablets", "bottles", "satchets", "pieces"],
-            required=True
-        ),
-        "expiry": st.column_config.DateColumn(
-            "Expiry Date",
-            format="YYYY-MM-DD",
-            min_value=date.today(),
-            required=True
-        ),
-        "location": st.column_config.TextColumn("Storage Location", required=True),
-        "status": st.column_config.SelectboxColumn(
-            "Status",
-            options=["OK", "Low", "Expired"],
-            required=True
-        ),
-        "Months Stock": st.column_config.NumberColumn(
-            "Months Stock",
-            format="%.2f",
-            disabled=True
-        )
-    }
-    
-    # Display styled read-only version as reference
-    st.caption("Color Key: 🟡 Low Stock | 🔴 Expired")
-    st.dataframe(
-        editable_df.style.apply(style_inventory_rows, axis=1),
+    edited_df = st.data_editor(
+        df,
+        num_rows="dynamic",
         use_container_width=True,
-        hide_index=True
+        disabled=["id", "Months Stock"],
+        column_config={
+            "minimum": st.column_config.NumberColumn(format="%.2f"),
+            "current": st.column_config.NumberColumn(format="%.2f"),
+            "monthly": st.column_config.NumberColumn(format="%.2f"),
+            "Months Stock": st.column_config.NumberColumn(format="%.2f"),
+            "expiry": st.column_config.DateColumn(
+                "Expiry Date",
+                format="YYYY-MM-DD",
+                help="Format: YYYY-MM-DD"
+            ),
+            "status": st.column_config.SelectboxColumn(
+                "Status",
+                options=["OK", "Low", "Critical", "Out of Stock", "Expired"],
+                required=True
+            )
+        }
     )
     
-    # Display editable version
-    with st.expander("✏️ Edit Inventory", expanded=True):
-        edited_df = st.data_editor(
-            editable_df,
-            num_rows="dynamic",
-            use_container_width=True,
-            disabled=["id", "Months Stock"],
-            column_config=column_config,
-            key="chemical_editor"
-        )
-    
-    # Handle save action
-    if st.button("💾 Save All Changes", type="primary"):
-        # Convert dates back to string format
+    if st.button("Save Chemical Changes"):
+        # Validate dates
         if 'expiry' in edited_df.columns:
-            edited_df['expiry'] = edited_df['expiry'].dt.strftime('%Y-%m-%d')
-        
-        # Round numeric columns again in case manual edits occurred
-        for col in numeric_cols:
-            if col in edited_df.columns:
-                edited_df[col] = edited_df[col].apply(
-                    lambda x: round(float(x), 2) if pd.notna(x) else None
-                )
-        
-        # Recalculate Months Stock with updated values
-        edited_df['Months Stock'] = edited_df.apply(
-            lambda row: round(calculate_months_of_stock(row), 2) 
-            if calculate_months_of_stock(row) is not None 
-            else None,
-            axis=1
-        )
-        
-        # Validate required fields
-        required_fields = ['item', 'category', 'minimum', 'current', 
-                         'monthly', 'unit', 'expiry', 'location']
-        missing_fields = [field for field in required_fields 
-                        if field in edited_df.columns and edited_df[field].isna().any()]
-        
-        if missing_fields:
-            st.error(f"Missing values in required fields: {', '.join(missing_fields)}")
-            st.stop()
-        
-        # Check for invalid dates
-        if 'expiry' in edited_df.columns and edited_df['expiry'].isna().any():
-            st.error("Some dates are invalid. Please use YYYY-MM-DD format.")
-            st.stop()
-        
-        # Update status based on new values
-        edited_df['status'] = np.where(
-            edited_df['current'] < edited_df['minimum'],
-            "Low",
-            np.where(
-                pd.to_datetime(edited_df['expiry']) < pd.to_datetime('today'),
-                "Expired",
-                "OK"
+            edited_df['expiry'] = pd.to_datetime(
+                edited_df['expiry'], 
+                format='%Y-%m-%d', 
+                errors='coerce'
             )
-        )
+            invalid_dates = edited_df[edited_df['expiry'].isna()]
+            if not invalid_dates.empty:
+                st.error("Some expiry dates are invalid. Please use YYYY-MM-DD format.")
+                st.stop()
         
-        # Update database
+        # Recalculate months of stock
+        if 'monthly' in edited_df.columns and 'current' in edited_df.columns:
+            edited_df['Months Stock'] = edited_df.apply(
+                lambda row: round(calculate_months_of_stock(row), 2), 
+                axis=1
+            )
+        
         save_to_db("chemicals", edited_df)
-        
-        # Refresh session state
         st.session_state.lab_inventory["chemicals"] = pd.read_sql(
             text("SELECT * FROM chemicals"), 
             get_conn()
         )
-        
         st.success("Changes saved successfully!")
         st.rerun()
-        
+
 def manage_glassware():
     """Glassware inventory management"""
     df = st.session_state.lab_inventory["glassware"].copy()
     
-    # Add new glassware
     with st.expander("➕ Add New Glassware", expanded=False):
         with st.form("add_glassware_form"):
             cols = st.columns([1, 2, 1])
             with cols[0]:
-                new_id = f"GLAS-{len(df)+1:03d}"
+                new_id = generate_unique_id("glassware")
                 st.text_input("ID", value=new_id, disabled=True)
                 item_name = st.text_input("Item Name", key="new_glass_name")
                 category = st.selectbox("Category", INVENTORY_CATEGORIES["glassware"])
             with cols[1]:
-                current_stock = st.number_input("Quantity", min_value=0, step=1, format = "%2.f")
+                current_stock = st.number_input("Quantity", min_value=0, step=1, format="%d")
                 unit = st.selectbox("Unit", ["pieces", "sets", "units"])
             with cols[2]:
                 location = st.text_input("Storage Location")
                 comment = st.text_input("Comments")
             
             if st.form_submit_button("Add Glassware"):
-                # Check for duplicate item name
                 existing_items = df['item'].str.lower().tolist()
                 if item_name.lower() in existing_items:
                     st.error(f"Glassware with the name '{item_name}' already exists in Inventory")
@@ -958,7 +746,19 @@ def manage_glassware():
                         "status": "OK"
                     }
                     
-                    # Insert into database
+                    # Double-check ID doesn't exist
+                    conn = get_conn()
+                    if conn:
+                        existing_id = conn.execute(
+                            text("SELECT id FROM glassware WHERE id = :id"),
+                            {"id": new_id}
+                        ).fetchone()
+                        
+                        if existing_id:
+                            st.error(f"ID {new_id} already exists! Generating new ID...")
+                            new_id = generate_unique_id("glassware")
+                            new_item["id"] = new_id
+                    
                     result = insert_item("glassware", new_item)
                     if result:
                         st.session_state.lab_inventory["glassware"] = pd.read_sql(
@@ -968,7 +768,6 @@ def manage_glassware():
                         st.success(f"Added {item_name} to inventory")
                         st.rerun()
     
-    # Edit existing glassware
     st.subheader("Current Glassware Inventory")
     edited_df = st.data_editor(
         df,
@@ -985,15 +784,11 @@ def manage_glassware():
     )
     
     if st.button("Save Glassware Changes"):
-        # Update database
         save_to_db("glassware", edited_df)
-        
-        # Refresh session state
         st.session_state.lab_inventory["glassware"] = pd.read_sql(
             text("SELECT * FROM glassware"), 
             get_conn()
         )
-        
         st.success("Changes saved successfully!")
         st.rerun()
 
@@ -1001,17 +796,16 @@ def manage_equipment():
     """Equipment inventory management"""
     df = st.session_state.lab_inventory["equipment"].copy()
     
-    # Add new equipment
     with st.expander("➕ Add New Equipment", expanded=False):
         with st.form("add_equipment_form"):
             cols = st.columns([1, 2, 1])
             with cols[0]:
-                new_id = f"EQUIP-{len(df)+1:03d}"
+                new_id = generate_unique_id("equipment")
                 st.text_input("ID", value=new_id, disabled=True)
                 item_name = st.text_input("Item Name", key="new_equip_name")
                 category = st.selectbox("Category", INVENTORY_CATEGORIES["equipment"])
             with cols[1]:
-                current_stock = st.number_input("Quantity", min_value=0, step=1, format="%.2f")
+                current_stock = st.number_input("Quantity", min_value=0, step=1, format="%d")
                 unit = st.selectbox("Unit", ["units", "sets"])
                 last_calibration = st.text_input("Last Calibration (YYYY-MM-DD)", placeholder="2024-01-01")
             with cols[2]:
@@ -1020,12 +814,10 @@ def manage_equipment():
                 comment = st.text_input("Comments")
             
             if st.form_submit_button("Add Equipment"):
-                # Validate calibration date
                 if last_calibration and not validate_date(last_calibration):
                     st.error("Invalid date format. Please use YYYY-MM-DD format.")
                     st.stop()
                 
-                # Check for duplicate item name
                 existing_items = df['item'].str.lower().tolist()
                 if item_name.lower() in existing_items:
                     st.error(f"An equipment item with the name '{item_name}' already exists in Inventory!")
@@ -1042,7 +834,19 @@ def manage_equipment():
                         "comment": comment
                     }
                     
-                    # Insert into database
+                    # Double-check ID doesn't exist
+                    conn = get_conn()
+                    if conn:
+                        existing_id = conn.execute(
+                            text("SELECT id FROM equipment WHERE id = :id"),
+                            {"id": new_id}
+                        ).fetchone()
+                        
+                        if existing_id:
+                            st.error(f"ID {new_id} already exists! Generating new ID...")
+                            new_id = generate_unique_id("equipment")
+                            new_item["id"] = new_id
+                    
                     result = insert_item("equipment", new_item)
                     if result:
                         st.session_state.lab_inventory["equipment"] = pd.read_sql(
@@ -1052,7 +856,6 @@ def manage_equipment():
                         st.success(f"Added {item_name} to inventory")
                         st.rerun()
     
-    # Edit existing equipment
     st.subheader("Current Equipment Inventory")
     edited_df = st.data_editor(
         df,
@@ -1074,7 +877,6 @@ def manage_equipment():
     )
     
     if st.button("Save Equipment Changes"):
-        # Validate dates before saving
         if 'last_calibration' in edited_df.columns:
             edited_df['last_calibration'] = pd.to_datetime(
                 edited_df['last_calibration'], 
@@ -1086,499 +888,300 @@ def manage_equipment():
                 st.error("Some calibration dates are invalid. Please use YYYY-MM-DD format.")
                 st.stop()
         
-        # Update database
         save_to_db("equipment", edited_df)
-        
-        # Refresh session state
         st.session_state.lab_inventory["equipment"] = pd.read_sql(
             text("SELECT * FROM equipment"), 
             get_conn()
         )
-        
         st.success("Changes saved successfully!")
         st.rerun()
 
-def display_analytics():
-    """Inventory analytics and visualization"""
-    st.subheader("Inventory Analytics")
-    
-    # Create combined dataframe
-    combined_df = create_combined_df()
-    
-    if combined_df.empty:
-        st.warning("No inventory data available")
-        return
-    
-    # Visualization options
-    viz_option = st.selectbox(
-        "Select Visualization",
-        ["Status Distribution", "Stock Levels", "Expiry Timeline"]
-    )
-    
-    if viz_option == "Status Distribution":
-        fig = px.pie(
-            combined_df, 
-            names='status', 
-            title='Inventory Status Distribution',
-            color='status',
-            color_discrete_map={
-                'OK': 'green',
-                'Low': 'orange',
-                'Expired': 'red',
-                'Damaged': 'red',
-                'Needs service': 'orange',
-                'In repair': 'red'
-            }
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    
-    elif viz_option == "Stock Levels":
-        fig = px.bar(
-            combined_df,
-            x='category',
-            y='current',
-            color='status',
-            title='Stock Levels by Category',
-            hover_data=['item', 'unit'],
-            color_discrete_map={
-                'OK': 'green',
-                'Low': 'orange',
-                'Expired': 'red',
-                'Damaged': 'red',
-                'Needs service': 'orange',
-                'In repair': 'red'
-            }
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    
-    elif viz_option == "Expiry Timeline":
-        if 'chemicals' not in st.session_state.lab_inventory:
-            st.warning("No chemical data available")
-            return
-            
-        chem_df = st.session_state.lab_inventory["chemicals"].copy()
-        if 'expiry' not in chem_df.columns:
-            st.warning("No expiry data available for chemicals")
-            return
-            
-        chem_df['expiry'] = pd.to_datetime(chem_df['expiry'], format='%Y-%m-%d', errors='coerce')
-        chem_df = chem_df.dropna(subset=['expiry'])
-        
-        if not chem_df.empty:
-            chem_df['Days Until Expiry'] = (chem_df['expiry'] - pd.to_datetime('today')).dt.days
-            # Format dates for display
-            chem_df['Expiry Display'] = chem_df['expiry'].dt.strftime('%b %Y')
-            fig = px.scatter(
-                chem_df,
-                x='expiry',
-                y='item',
-                size='current',
-                color='Days Until Expiry',
-                hover_data=['minimum', 'location'],
-                title='Chemical Expiry Timeline',
-                labels={'expiry': 'Expiry Date', 'Expiry Display': 'Expiry Date'}
-            )
-            fig.update_xaxes(tickformat="%b %Y")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("No chemicals with valid expiry dates found")
+# ======================
+# Reporting Functions
+# ======================
 
-def display_alerts():
-    """Display inventory alerts"""
-    st.subheader("Inventory Alerts")
+def generate_inventory_report():
+    """Generate a comprehensive inventory report"""
+    doc = Document()
+    doc.add_heading('Laboratory Inventory Report', 0)
     
-    # Chemical alerts
-    chem_df = st.session_state.lab_inventory["chemicals"]
+    # Add date and time
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    doc.add_paragraph(f"Report generated on: {current_time}")
     
-    # Initialize empty DataFrames for alerts
-    low_stock = pd.DataFrame()
-    expired = pd.DataFrame()
+    # Add summary statistics
+    doc.add_heading('Summary Statistics', level=1)
     
-    if not chem_df.empty and 'status' in chem_df.columns:
-        low_stock = chem_df[chem_df["status"] == "Low"]
-        expired = chem_df[chem_df["status"] == "Expired"]
+    summary_data = []
+    for category in ["chemicals", "glassware", "equipment"]:
+        stats = calculate_category_stats(category)
+        summary_data.append({
+            "Category": category.capitalize(),
+            "Total Items": stats['total'],
+            "Low Stock": stats.get('low', 0),
+            "Expired": stats.get('expired', 0),
+            "Damaged": stats.get('damaged', 0),
+            "Issues": stats.get('issues', 0)
+        })
     
-    if not low_stock.empty:
-        st.warning(f"🧪 {len(low_stock)} Chemicals Need Restocking")
-        st.dataframe(
-            low_stock[["id", "item", "current", "minimum", "unit", "location"]],
-            hide_index=True
-        )
+    # Add summary table
+    table = doc.add_table(rows=1, cols=6)
+    table.style = 'Table Grid'
+    hdr_cells = table.rows[0].cells
+    hdr_cells[0].text = 'Category'
+    hdr_cells[1].text = 'Total Items'
+    hdr_cells[2].text = 'Low Stock'
+    hdr_cells[3].text = 'Expired'
+    hdr_cells[4].text = 'Damaged'
+    hdr_cells[5].text = 'Issues'
     
-    if not expired.empty:
-        st.error(f"⏳ {len(expired)} Expired Chemicals")
-        st.dataframe(
-            expired[["id", "item", "expiry", "location"]],
-            hide_index=True
-        )
+    for item in summary_data:
+        row_cells = table.add_row().cells
+        row_cells[0].text = item['Category']
+        row_cells[1].text = str(item['Total Items'])
+        row_cells[2].text = str(item['Low Stock'])
+        row_cells[3].text = str(item['Expired'])
+        row_cells[4].text = str(item['Damaged'])
+        row_cells[5].text = str(item['Issues'])
     
-    # Glassware alerts
-    glass_df = st.session_state.lab_inventory["glassware"]
-    damaged = pd.DataFrame()
-    
-    if not glass_df.empty and 'status' in glass_df.columns:
-        damaged = glass_df[glass_df["status"] == "Damaged"]
-    
-    if not damaged.empty:
-        st.error(f"🔧 {len(damaged)} Damaged Glassware Items")
-        st.dataframe(
-            damaged[["id", "item", "comment", "location"]],
-            hide_index=True
-        )
-    
-    # Equipment alerts
-    equip_df = st.session_state.lab_inventory["equipment"]
-    issues = pd.DataFrame()
-    
-    if not equip_df.empty and 'status' in equip_df.columns:
-        issues = equip_df[equip_df["status"].str.contains("need|repair", case=False, na=False)]
-    
-    if not issues.empty:
-        st.error(f"⚠️ {len(issues)} Equipment Issues")
-        st.dataframe(
-            issues[["id", "item", "status", "last_calibration"]],
-            hide_index=True
-        )
-    
-    if low_stock.empty and expired.empty and damaged.empty and issues.empty:
-        st.success("✅ No critical alerts at this time")
+    # Add detailed sections for each category
+    for category in ["chemicals", "glassware", "equipment"]:
+        doc.add_heading(f"{category.capitalize()} Inventory", level=1)
+        df = st.session_state.lab_inventory[category].copy()
         
-def display_export():
-    """Export and email functionality"""
-    st.subheader("Export Inventory Data")
-    
-    # Export options
-    export_type = st.selectbox(
-        "Export Type",
-        ["Full Inventory", "Chemicals Only", "Restocking List", "Expiry Report"]
-    )
-    
-    format_type = st.selectbox(
-        "Format",
-        ["Word Document", "Excel", "CSV"]
-    )
-    
-    # Generate report
-    if st.button("Generate Report"):
-        if format_type == "Word Document":
-            export_word_report(export_type)
-        elif format_type == "Excel":
-            export_excel(export_type)
-        else:
-            export_csv(export_type)
-    
-    # Email functionality
-    st.subheader("Email Report")
-    with st.form("email_form"):
-        recipient = st.text_input("Recipient Email")
-        subject = st.text_input("Subject", value="Lab Inventory Report")
-        message = st.text_area("Message")
+        if category == "chemicals":
+            if 'expiry' in df.columns:
+                df['expiry'] = pd.to_datetime(df['expiry']).dt.strftime('%Y-%m-%d')
         
-        if st.form_submit_button("Send Email"):
-            if not recipient:
-                st.error("Please enter a recipient email")
-            else:
-                try:
-                    send_email_report(recipient, subject, message, export_type)
-                    st.success("Email sent successfully!")
-                except Exception as e:
-                    st.error(f"Failed to send email: {str(e)}")
-
-def export_word_report(report_type):
-    """Generate Word document report"""
-    document = Document()
-    
-    # Add title and metadata
-    document.add_heading('Lab Inventory Report', 0)
-    document.add_paragraph(f"Report Type: {report_type}")
-    document.add_paragraph(f"Generated on: {dt.datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    document.add_paragraph(f"Generated by: {st.session_state.get('username', 'System')}")
-    
-    # Add content based on report type
-    if report_type in ["Full Inventory", "Chemicals Only"]:
-        add_chemicals_to_word(document)
-    
-    if report_type in ["Full Inventory"]:
-        add_glassware_to_word(document)
-        add_equipment_to_word(document)
-    
-    if report_type == "Restocking List":
-        add_restocking_list(document)
-    
-    if report_type == "Expiry Report":
-        add_expiry_report(document)
-    
-    # Save to BytesIO and offer download
-    file_stream = BytesIO()
-    document.save(file_stream)
-    file_stream.seek(0)
-    
-    st.download_button(
-        label="Download Word Report",
-        data=file_stream,
-        file_name=f"lab_inventory_{report_type.replace(' ', '_')}.docx",
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    )
-
-def add_chemicals_to_word(document):
-    """Add chemicals section to Word document"""
-    chem_df = st.session_state.lab_inventory["chemicals"]
-    document.add_heading('Chemicals Inventory', level=1)
-    
-    if not chem_df.empty:
-        table = document.add_table(rows=1, cols=len(chem_df.columns), style='Table Grid')
-        hdr_cells = table.rows[0].cells
+        # Create table
+        table = doc.add_table(rows=1, cols=len(df.columns)+1)
+        table.style = 'Table Grid'
         
         # Add headers
-        for i, col in enumerate(chem_df.columns):
+        hdr_cells = table.rows[0].cells
+        for i, col in enumerate(df.columns):
             hdr_cells[i].text = str(col)
         
-        # Add data rows
-        for _, row in chem_df.iterrows():
+        # Add data rows with conditional formatting
+        for _, row in df.iterrows():
             row_cells = table.add_row().cells
-            for i, value in enumerate(row):
-                if col == 'expiry' and pd.notna(value):
-                    row_cells[i].text = format_date_for_display(value)
-                else:
-                    row_cells[i].text = str(value)
-    else:
-        document.add_paragraph("No chemical items in inventory")
+            for i, col in enumerate(df.columns):
+                row_cells[i].text = str(row[col])
+                
+                # Apply color based on status
+                if 'status' in df.columns and col == 'status':
+                    if row['status'] == 'Low':
+                        for paragraph in row_cells[i].paragraphs:
+                            for run in paragraph.runs:
+                                run.font.color.rgb = RGBColor(0x80, 0x00, 0x00)  # Dark red
+                    elif row['status'] == 'Expired':
+                        for paragraph in row_cells[i].paragraphs:
+                            for run in paragraph.runs:
+                                run.font.color.rgb = RGBColor(0xFF, 0x00, 0x00)  # Bright red
+                    elif row['status'] == 'Damaged':
+                        for paragraph in row_cells[i].paragraphs:
+                            for run in paragraph.runs:
+                                run.font.color.rgb = RGBColor(0xFF, 0x00, 0x00)  # Bright red
+                    elif row['status'] in ['Needs service', 'In repair']:
+                        for paragraph in row_cells[i].paragraphs:
+                            for run in paragraph.runs:
+                                run.font.color.rgb = RGBColor(0x80, 0x80, 0x00)  # Dark yellow
+    
+    # Save to BytesIO buffer
+    buffer = BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
 
-def add_glassware_to_word(document):
-    """Add glassware section to Word document"""
-    glass_df = st.session_state.lab_inventory["glassware"]
-    document.add_heading('Glassware Inventory', level=1)
-    
-    if not glass_df.empty:
-        table = document.add_table(rows=1, cols=len(glass_df.columns), style='Table Grid')
-        hdr_cells = table.rows[0].cells
-        
-        # Add headers
-        for i, col in enumerate(glass_df.columns):
-            hdr_cells[i].text = str(col)
-        
-        # Add data rows
-        for _, row in glass_df.iterrows():
-            row_cells = table.add_row().cells
-            for i, value in enumerate(row):
-                row_cells[i].text = str(value)
-    else:
-        document.add_paragraph("No glassware items in inventory")
-
-def add_equipment_to_word(document):
-    """Add equipment section to Word document"""
-    equip_df = st.session_state.lab_inventory["equipment"]
-    document.add_heading('Equipment Inventory', level=1)
-    
-    if not equip_df.empty:
-        table = document.add_table(rows=1, cols=len(equip_df.columns), style='Table Grid')
-        hdr_cells = table.rows[0].cells
-        
-        # Add headers
-        for i, col in enumerate(equip_df.columns):
-            hdr_cells[i].text = str(col)
-        
-        # Add data rows
-        for _, row in equip_df.iterrows():
-            row_cells = table.add_row().cells
-            for i, value in enumerate(row):
-                if col == 'last_calibration' and pd.notna(value):
-                    row_cells[i].text = format_date_for_display(value)
-                else:
-                    row_cells[i].text = str(value)
-    else:
-        document.add_paragraph("No equipment items in inventory")
-
-def add_restocking_list(document):
-    """Add restocking list to Word document"""
-    document.add_heading('Restocking List', level=1)
-    
-    chem_df = st.session_state.lab_inventory["chemicals"]
-    low_stock = chem_df[chem_df["status"] == "Low"]
-    
-    if not low_stock.empty:
-        document.add_paragraph('Chemicals needing restocking:')
-        table = document.add_table(rows=1, cols=5, style='Table Grid')
-        hdr_cells = table.rows[0].cells
-        hdr_cells[0].text = "ID"
-        hdr_cells[1].text = "Item"
-        hdr_cells[2].text = "Current"
-        hdr_cells[3].text = "Minimum"
-        hdr_cells[4].text = "Deficit"
-        
-        for _, row in low_stock.iterrows():
-            row_cells = table.add_row().cells
-            row_cells[0].text = str(row["id"])
-            row_cells[1].text = str(row["item"])
-            row_cells[2].text = str(row["current"])
-            row_cells[3].text = str(row["minimum"])
-            row_cells[4].text = str(row["minimum"] - row["current"])
-    else:
-        document.add_paragraph("No items currently need restocking")
-
-def add_expiry_report(document):
-    """Add expiry report to Word document"""
-    document.add_heading('Expiry Report', level=1)
-    
-    chem_df = st.session_state.lab_inventory["chemicals"]
-    chem_df['expiry'] = pd.to_datetime(chem_df['expiry'], format='%Y-%m-%d', errors='coerce')
-    expiring = chem_df[~chem_df['expiry'].isna()]
-    
-    if not expiring.empty:
-        document.add_paragraph('Chemicals with expiry dates:')
-        table = document.add_table(rows=1, cols=4, style='Table Grid')
-        hdr_cells = table.rows[0].cells
-        hdr_cells[0].text = "ID"
-        hdr_cells[1].text = "Item"
-        hdr_cells[2].text = "Expiry Date"
-        hdr_cells[3].text = "Days Until Expiry"
-        
-        for _, row in expiring.iterrows():
-            days_until = (row['expiry'] - pd.to_datetime('today')).days
-            row_cells = table.add_row().cells
-            row_cells[0].text = str(row["id"])
-            row_cells[1].text = str(row["item"])
-            row_cells[2].text = format_date_for_display(row['expiry'].strftime('%Y-%m-%d'))
-            row_cells[3].text = str(days_until)
-    else:
-        document.add_paragraph("No chemicals with expiry dates in inventory")
-
-def export_excel(report_type):
-    """Generate Excel report"""
-    if report_type == "Full Inventory":
-        df = create_combined_df()
-    elif report_type == "Chemicals Only":
-        df = st.session_state.lab_inventory["chemicals"].copy()
-    elif report_type == "Restocking List":
-        chem_df = st.session_state.lab_inventory["chemicals"].copy()
-        df = chem_df[chem_df["status"] == "Low"]
-        if not df.empty:
-            df['Deficit'] = df['minimum'] - df['current']
-    elif report_type == "Expiry Report":
-        chem_df = st.session_state.lab_inventory["chemicals"].copy()
-        chem_df['expiry'] = pd.to_datetime(chem_df['expiry'], format='%Y-%m-%d', errors='coerce')
-        df = chem_df[~chem_df['expiry'].isna()]
-        if not df.empty:
-            df['Days Until Expiry'] = (df['expiry'] - pd.to_datetime('today')).dt.days
-    
-    # Create Excel file
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Inventory')
-    output.seek(0)
-    
-    st.download_button(
-        label="Download Excel Report",
-        data=output,
-        file_name=f"lab_inventory_{report_type.replace(' ', '_')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-def export_csv(report_type):
-    """Generate CSV report"""
-    if report_type == "Full Inventory":
-        df = create_combined_df()
-    elif report_type == "Chemicals Only":
-        df = st.session_state.lab_inventory["chemicals"].copy()
-    elif report_type == "Restocking List":
-        chem_df = st.session_state.lab_inventory["chemicals"].copy()
-        df = chem_df[chem_df["status"] == "Low"]
-        if not df.empty:
-            df['Deficit'] = df['minimum'] - df['current']
-    elif report_type == "Expiry Report":
-        chem_df = st.session_state.lab_inventory["chemicals"].copy()
-        chem_df['expiry'] = pd.to_datetime(chem_df['expiry'], format='%Y-%m-%d', errors='coerce')
-        df = chem_df[~chem_df['expiry'].isna()]
-        if not df.empty:
-            df['Days Until Expiry'] = (df['expiry'] - pd.to_datetime('today')).dt.days
-    
-    csv = df.to_csv(index=False).encode('utf-8')
-    
-    st.download_button(
-        label="Download CSV Report",
-        data=csv,
-        file_name=f"lab_inventory_{report_type.replace(' ', '_')}.csv",
-        mime="text/csv"
-    )
-
-def send_email_report(recipient, subject, message, report_type):
-    """Send inventory report via email"""
-    # Create email message
-    msg = MIMEMultipart()
-    msg['From'] = st.secrets["email"]["username"]
-    msg['To'] = recipient
-    msg['Subject'] = subject
-    
-    # Add message body
-    msg.attach(MIMEText(message, 'plain'))
-    
-    # Create attachment based on report type
-    if report_type == "Full Inventory":
-        df = create_combined_df()
-        filename = "full_inventory.csv"
-        attachment = MIMEBase('application', 'octet-stream')
-        attachment.set_payload(df.to_csv(index=False).encode('utf-8'))
-    elif report_type == "Chemicals Only":
-        df = st.session_state.lab_inventory["chemicals"].copy()
-        filename = "chemicals_inventory.csv"
-        attachment = MIMEBase('application', 'octet-stream')
-        attachment.set_payload(df.to_csv(index=False).encode('utf-8'))
-    elif report_type == "Restocking List":
-        chem_df = st.session_state.lab_inventory["chemicals"].copy()
-        df = chem_df[chem_df["status"] == "Low"]
-        if not df.empty:
-            df['Deficit'] = df['minimum'] - df['current']
-        filename = "restocking_list.csv"
-        attachment = MIMEBase('application', 'octet-stream')
-        attachment.set_payload(df.to_csv(index=False).encode('utf-8'))
-    elif report_type == "Expiry Report":
-        chem_df = st.session_state.lab_inventory["chemicals"].copy()
-        chem_df['expiry'] = pd.to_datetime(chem_df['expiry'], format='%Y-%m-%d', errors='coerce')
-        df = chem_df[~chem_df['expiry'].isna()]
-        if not df.empty:
-            df['Days Until Expiry'] = (df['expiry'] - pd.to_datetime('today')).dt.days
-        filename = "expiry_report.csv"
-        attachment = MIMEBase('application', 'octet-stream')
-        attachment.set_payload(df.to_csv(index=False).encode('utf-8'))
-    
-    # Add attachment headers
-    encoders.encode_base64(attachment)
-    attachment.add_header('Content-Disposition', f'attachment; filename={filename}')
-    msg.attach(attachment)
-    
-    # Connect to SMTP server and send
+def send_email_report(receiver_email, subject, body, attachment=None):
+    """Send inventory report via email with improved error handling"""
     try:
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(st.secrets["email"]["username"], st.secrets["email"]["password"])
-        server.send_message(msg)
-        server.quit()
+        # Verify email configuration exists
+        if "email" not in st.secrets:
+            st.error("Email configuration not found in secrets")
+            return False
+            
+        email_config = st.secrets["email"]
+        
+        # Validate required fields
+        required_fields = ["sender", "password", "smtp_server", "smtp_port"]
+        for field in required_fields:
+            if field not in email_config:
+                st.error(f"Missing required email configuration: {field}")
+                return False
+        
+        # Create message container
+        msg = MIMEMultipart()
+        msg['From'] = email_config["sender"]
+        msg['To'] = receiver_email
+        msg['Subject'] = subject
+        
+        # Attach body
+        msg.attach(MIMEText(body, 'plain'))
+        
+        # Attach file if provided
+        if attachment:
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(attachment.read())
+            encoders.encode_base64(part)
+            part.add_header('Content-Disposition', 
+                          'attachment; filename="inventory_report.docx"')
+            msg.attach(part)
+        
+        # Connect to server and send email
+        try:
+            # Note: Using port 465 with SMTP_SSL instead of port 587 with starttls
+            with smtplib.SMTP_SSL(
+                email_config["smtp_server"], 
+                int(email_config["smtp_port"])
+            ) as server:
+                server.login(email_config["sender"], email_config["password"])
+                server.send_message(msg)
+                st.success("Email sent successfully!")
+                return True
+                
+        except smtplib.SMTPAuthenticationError:
+            st.error("Authentication failed. Please check your email and password.")
+            return False
+        except smtplib.SMTPException as e:
+            st.error(f"SMTP error occurred: {str(e)}")
+            return False
+            
     except Exception as e:
-        raise Exception(f"Email sending failed: {str(e)}")
+        st.error(f"Unexpected error occurred: {str(e)}")
+        return False
+
+def show_reporting_section():
+    """Display the reporting interface"""
+    st.header("📊 Inventory Reporting")
+    
+    with st.expander("📄 Generate Report", expanded=True):
+        report_type = st.selectbox("Select Report Type", 
+                                 ["Full Inventory", "Chemicals Only", "Glassware Only", "Equipment Only"])
+        
+        if st.button("Generate Report"):
+            with st.spinner("Generating report..."):
+                report_buffer = generate_inventory_report()
+                st.success("Report generated successfully!")
+                
+                st.download_button(
+                    label="Download Report",
+                    data=report_buffer,
+                    file_name=f"lab_inventory_report_{datetime.now().strftime('%Y%m%d')}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
+                
+                # Email report option
+                with st.expander("📧 Email Report"):
+                    receiver_email = st.text_input("Recipient Email")
+                    email_subject = st.text_input("Subject", value=f"Lab Inventory Report - {datetime.now().strftime('%Y-%m-%d')}")
+                    email_body = st.text_area("Email Body", value="Please find attached the latest laboratory inventory report.")
+                    
+                    if st.button("Send Email"):
+                        if not receiver_email:
+                            st.error("Please enter a recipient email address")
+                        else:
+                            if send_email_report(receiver_email, email_subject, email_body, report_buffer):
+                                st.success("Email sent successfully!")
+                            else:
+                                st.error("Failed to send email")
+    
+    with st.expander("📈 Visualizations", expanded=False):
+        st.subheader("Inventory Visualizations")
+        
+        # Chemicals visualization
+        if not st.session_state.lab_inventory["chemicals"].empty:
+            st.markdown("#### Chemicals Status")
+            chem_df = st.session_state.lab_inventory["chemicals"].copy()
+            
+            # Status distribution
+            fig1 = px.pie(chem_df, names='status', title='Chemical Status Distribution')
+            st.plotly_chart(fig1, use_container_width=True)
+            
+            # Months of stock histogram
+            if 'Months Stock' in chem_df.columns:
+                fig2 = px.histogram(
+                    chem_df, 
+                    x='Months Stock', 
+                    title='Months of Stock Remaining',
+                    nbins=20
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+        
+        # Equipment visualization
+        if not st.session_state.lab_inventory["equipment"].empty:
+            st.markdown("#### Equipment Status")
+            equip_df = st.session_state.lab_inventory["equipment"].copy()
+            
+            fig3 = px.pie(equip_df, names='status', title='Equipment Status Distribution')
+            st.plotly_chart(fig3, use_container_width=True)
+
+# ======================
+# Main Page
+# ======================
+
+def display_lab_inventory_page():
+    """Main inventory management interface"""
+    st.title("🧪 Laboratory Inventory Management")
+    
+    if 'lab_inventory' not in st.session_state:
+        initialize_inventory_data()
+    
+    # Display summary cards
+    st.subheader("Inventory Summary")
+    cols = st.columns(3)
+    
+    for i, category in enumerate(["chemicals", "glassware", "equipment"]):
+        stats = calculate_category_stats(category)
+        
+        with cols[i]:
+            container = st.container(border=True)
+            container.markdown(f"**{category.capitalize()}**")
+            container.metric("Total Items", stats['total'])
+            
+            if category == "chemicals":
+                container.metric("Low Stock", stats['low'], delta=f"-{stats['low']} items")
+                container.metric("Expired", stats['expired'], delta_color="inverse")
+            elif category == "glassware":
+                container.metric("Damaged", stats['damaged'], delta_color="inverse")
+            elif category == "equipment":
+                container.metric("Needs Attention", stats['issues'], delta_color="inverse")
+    
+    # Navigation tabs
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "🧪 Chemicals", 
+        "🧫 Glassware", 
+        "⚙️ Equipment", 
+        "📊 Reports"
+    ])
+    
+    with tab1:
+        manage_chemicals()
+    
+    with tab2:
+        manage_glassware()
+    
+    with tab3:
+        manage_equipment()
+    
+    with tab4:
+        show_reporting_section()
 
 if __name__ == "__main__":
     try:
-        # Initialize database connection
         conn = get_conn()
         if conn:
             try:
-                # Initialize tables if they don't exist
                 init_inventory_tables()
-                
-                # Load initial data
                 st.session_state.lab_inventory = load_from_db()
                 
-                # Check if we need to load sample data
                 if all(df.empty for df in st.session_state.lab_inventory.values()):
                     load_sample_data()
                     for category, df in st.session_state.lab_inventory.items():
                         save_to_db(category, df)
                     st.session_state.lab_inventory = load_from_db()
                 
-                # Check restock status
                 check_restock_status()
-                
-                # Display the main interface
                 display_lab_inventory_page()
             finally:
                 conn.close()
