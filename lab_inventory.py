@@ -125,6 +125,72 @@ def generate_unique_id(category):
     finally:
         if conn:
             conn.close()
+def send_email_report(receiver_email, subject, body, attachment=None):
+    """Send inventory report via email with improved error handling"""
+    try:
+        # Verify email configuration exists
+        if "email" not in st.secrets:
+            st.error("Email configuration not found in secrets")
+            return False
+            
+        email_config = st.secrets["email"]
+        
+        # Validate required fields
+        required_fields = ["sender", "password", "smtp_server", "smtp_port"]
+        for field in required_fields:
+            if field not in email_config:
+                st.error(f"Missing required email configuration: {field}")
+                return False
+        
+        # Create message container
+        msg = MIMEMultipart()
+        msg['From'] = email_config["sender"]
+        msg['To'] = receiver_email
+        msg['Subject'] = subject
+        
+        # Attach body
+        msg.attach(MIMEText(body, 'plain'))
+        
+        # Attach file if provided
+        if attachment:
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(attachment.read())
+            encoders.encode_base64(part)
+            part.add_header('Content-Disposition', 
+                          'attachment; filename="inventory_report.docx"')
+            msg.attach(part)
+        
+        # Connect to server and send email
+        try:
+            # Use SMTP_SSL for port 465, regular SMTP for port 587
+            if int(email_config["smtp_port"]) == 465:
+                with smtplib.SMTP_SSL(
+                    email_config["smtp_server"], 
+                    int(email_config["smtp_port"])
+                ) as server:
+                    server.login(email_config["sender"], email_config["password"])
+                    server.send_message(msg)
+            else:
+                with smtplib.SMTP(
+                    email_config["smtp_server"], 
+                    int(email_config["smtp_port"])
+                ) as server:
+                    server.starttls()
+                    server.login(email_config["sender"], email_config["password"])
+                    server.send_message(msg)
+            
+            return True
+                
+        except smtplib.SMTPAuthenticationError:
+            st.error("Authentication failed. Please check your email and password.")
+            return False
+        except smtplib.SMTPException as e:
+            st.error(f"SMTP error occurred: {str(e)}")
+            return False
+            
+    except Exception as e:
+        st.error(f"Unexpected error occurred: {str(e)}")
+        return False
 
 # ======================
 # Database Functions
@@ -897,171 +963,335 @@ def manage_equipment():
         st.rerun()
 
 # ======================
-# Reporting Functions
+# Enhanced Visualization Functions
 # ======================
 
-def generate_inventory_report():
-    """Generate a comprehensive inventory report"""
-    doc = Document()
-    doc.add_heading('Laboratory Inventory Report', 0)
+def display_inventory_dashboard():
+    """Display comprehensive inventory dashboard with visualizations and inventory tables"""
+    st.title("📊 Inventory Dashboard")
     
-    # Add date and time
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    doc.add_paragraph(f"Report generated on: {current_time}")
+    # Summary statistics
+    st.subheader("Inventory Summary")
+    cols = st.columns(4)
     
-    # Add summary statistics
-    doc.add_heading('Summary Statistics', level=1)
+    total_items = 0
+    low_stock_items = 0
+    expired_items = 0
+    damaged_items = 0
     
-    summary_data = []
     for category in ["chemicals", "glassware", "equipment"]:
         stats = calculate_category_stats(category)
-        summary_data.append({
-            "Category": category.capitalize(),
-            "Total Items": stats['total'],
-            "Low Stock": stats.get('low', 0),
-            "Expired": stats.get('expired', 0),
-            "Damaged": stats.get('damaged', 0),
-            "Issues": stats.get('issues', 0)
-        })
+        total_items += stats['total']
+        low_stock_items += stats.get('low', 0)
+        expired_items += stats.get('expired', 0)
+        damaged_items += stats.get('damaged', 0)
+    
+    with cols[0]:
+        st.metric("Total Items", total_items)
+    with cols[1]:
+        st.metric("Low Stock Items", low_stock_items, delta=f"-{low_stock_items} items")
+    with cols[2]:
+        st.metric("Expired Items", expired_items, delta_color="inverse")
+    with cols[3]:
+        st.metric("Damaged Items", damaged_items, delta_color="inverse")
+    
+    # Tabs for different sections
+    tab1, tab2, tab3, tab4 = st.tabs(["Visualizations", "All Inventory", "Chemicals", "Glassware & Equipment"])
+    
+    with tab1:
+        # Existing visualization content
+        st.subheader("Inventory Status Overview")
+        
+        # Combine data from all categories
+        combined_data = []
+        for category in ["chemicals", "glassware", "equipment"]:
+            df = st.session_state.lab_inventory[category].copy()
+            df['category_type'] = category.capitalize()
+            combined_data.append(df)
+        
+        combined_df = pd.concat(combined_data, ignore_index=True)
+        
+        # Status distribution pie chart
+        if not combined_df.empty:
+            col1, col2 = st.columns(2)
+            with col1:
+                fig1 = px.pie(
+                    combined_df, 
+                    names='status', 
+                    title='Overall Status Distribution',
+                    color='status',
+                    color_discrete_map={
+                        'OK': '#2ecc71',
+                        'Low': '#f39c12',
+                        'Critical': '#e74c3c',
+                        'Expired': '#c0392b',
+                        'Damaged': '#c0392b',
+                        'Needs service': '#f39c12',
+                        'In repair': '#f39c12'
+                    }
+                )
+                st.plotly_chart(fig1, use_container_width=True)
+            
+            with col2:
+                fig2 = px.bar(
+                    combined_df.groupby(['category_type', 'status']).size().reset_index(name='count'),
+                    x='category_type',
+                    y='count',
+                    color='status',
+                    title='Status by Category',
+                    labels={'category_type': 'Category', 'count': 'Count'},
+                    color_discrete_map={
+                        'OK': '#2ecc71',
+                        'Low': '#f39c12',
+                        'Critical': '#e74c3c',
+                        'Expired': '#c0392b',
+                        'Damaged': '#c0392b',
+                        'Needs service': '#f39c12',
+                        'In repair': '#f39c12'
+                    }
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+        else:
+            st.info("No inventory data available for visualization.")
+        
+        # Stock level and expiry analysis
+        st.subheader("Detailed Analysis")
+        
+        if not st.session_state.lab_inventory["chemicals"].empty:
+            chem_df = st.session_state.lab_inventory["chemicals"].copy()
+            
+            # Stock level analysis
+            if 'current' in chem_df.columns and 'minimum' in chem_df.columns:
+                chem_df = chem_df.dropna(subset=['current', 'minimum'])
+                chem_df['percent_of_min'] = (chem_df['current'] / chem_df['minimum']) * 100
+                
+                fig3 = px.bar(
+                    chem_df.sort_values('percent_of_min'),
+                    x='item',
+                    y='percent_of_min',
+                    title='Stock Levels (% of Minimum)',
+                    labels={'percent_of_min': '% of Minimum Stock'},
+                    color='percent_of_min',
+                    color_continuous_scale='RdYlGn_r'
+                )
+                st.plotly_chart(fig3, use_container_width=True)
+            
+            # Expiry analysis
+            if 'expiry' in chem_df.columns:
+                chem_df['expiry'] = pd.to_datetime(chem_df['expiry'], errors='coerce')
+                chem_df = chem_df.dropna(subset=['expiry'])
+                chem_df['days_until_expiry'] = (chem_df['expiry'] - pd.to_datetime('today')).dt.days
+                
+                fig4 = px.bar(
+                    chem_df.sort_values('days_until_expiry'),
+                    x='item',
+                    y='days_until_expiry',
+                    title='Days Until Expiry',
+                    color='days_until_expiry',
+                    color_continuous_scale='YlOrRd_r'
+                )
+                st.plotly_chart(fig4, use_container_width=True)
+    
+    with tab2:
+        # All Inventory Table
+        st.subheader("Complete Inventory List")
+        
+        combined_data = []
+        for category in ["chemicals", "glassware", "equipment"]:
+            df = st.session_state.lab_inventory[category].copy()
+            df['Type'] = category.capitalize()
+            combined_data.append(df)
+        
+        combined_df = pd.concat(combined_data, ignore_index=True)
+        
+        if not combined_df.empty:
+            def color_code_row(row):
+                colors = [''] * len(row)
+                status = row.get('status', '')
+                
+                if status == 'Low':
+                    colors = ['background-color: #FFF3CD'] * len(row)
+                elif status in ['Expired', 'Critical', 'Damaged']:
+                    colors = ['background-color: #F8D7DA'] * len(row)
+                elif status in ['Needs service', 'In repair']:
+                    colors = ['background-color: #FFF3CD'] * len(row)
+                
+                return colors
+            
+            st.dataframe(
+                combined_df.style.apply(color_code_row, axis=1),
+                use_container_width=True,
+                height=600,
+                column_order=['Type', 'id', 'item', 'category', 'current', 'minimum', 'status', 'expiry']
+            )
+        else:
+            st.info("No inventory data available")
+    
+    with tab3:
+        # Chemicals Table
+        st.subheader("Chemical Inventory")
+        chem_df = st.session_state.lab_inventory["chemicals"].copy()
+        
+        if not chem_df.empty:
+            def color_code_chemicals(row):
+                colors = [''] * len(row)
+                status = row.get('status', '')
+                
+                if status == 'Low':
+                    colors = ['background-color: #FFF3CD'] * len(row)
+                elif status in ['Expired', 'Critical']:
+                    colors = ['background-color: #F8D7DA'] * len(row)
+                
+                return colors
+            
+            st.dataframe(
+                chem_df.style.apply(color_code_chemicals, axis=1),
+                use_container_width=True,
+                height=600,
+                column_order=['id', 'item', 'category', 'current', 'minimum', 'monthly', 'Months Stock', 'status', 'expiry']
+            )
+        else:
+            st.info("No chemical inventory data available")
+    
+    with tab4:
+        # Glassware and Equipment Tables
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Glassware Inventory")
+            glass_df = st.session_state.lab_inventory["glassware"].copy()
+            
+            if not glass_df.empty:
+                def color_code_glassware(row):
+                    colors = [''] * len(row)
+                    if row.get('status', '') == 'Damaged':
+                        colors = ['background-color: #F8D7DA'] * len(row)
+                    return colors
+                
+                st.dataframe(
+                    glass_df.style.apply(color_code_glassware, axis=1),
+                    use_container_width=True,
+                    height=600
+                )
+            else:
+                st.info("No glassware inventory data available")
+        
+        with col2:
+            st.subheader("Equipment Inventory")
+            equip_df = st.session_state.lab_inventory["equipment"].copy()
+            
+            if not equip_df.empty:
+                def color_code_equipment(row):
+                    colors = [''] * len(row)
+                    if row.get('status', '') in ['Needs service', 'In repair']:
+                        colors = ['background-color: #FFF3CD'] * len(row)
+                    return colors
+                
+                st.dataframe(
+                    equip_df.style.apply(color_code_equipment, axis=1),
+                    use_container_width=True,
+                    height=600
+                )
+            else:
+                st.info("No equipment inventory data available")
+                
+# ======================
+# Enhanced Reporting Functions
+# ======================
+
+def generate_comprehensive_report():
+    """Generate a comprehensive inventory report with visualizations"""
+    # Create a buffer for the report
+    buffer = BytesIO()
+    
+    # Create a document
+    doc = Document()
+    doc.add_heading('Laboratory Inventory Comprehensive Report', 0)
+    
+    # Add report metadata
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    doc.add_paragraph(f"Report generated on: {current_time}")
+    doc.add_paragraph(f"Generated by: {st.session_state.username}")
+    
+    # Add summary statistics
+    doc.add_heading('Executive Summary', level=1)
+    
+    # Calculate summary stats
+    total_items = 0
+    low_stock = 0
+    expired = 0
+    damaged = 0
+    issues = 0
+    
+    for category in ["chemicals", "glassware", "equipment"]:
+        stats = calculate_category_stats(category)
+        total_items += stats['total']
+        low_stock += stats.get('low', 0)
+        expired += stats.get('expired', 0)
+        damaged += stats.get('damaged', 0)
+        issues += stats.get('issues', 0)
     
     # Add summary table
-    table = doc.add_table(rows=1, cols=6)
+    table = doc.add_table(rows=5, cols=2)
     table.style = 'Table Grid'
-    hdr_cells = table.rows[0].cells
-    hdr_cells[0].text = 'Category'
-    hdr_cells[1].text = 'Total Items'
-    hdr_cells[2].text = 'Low Stock'
-    hdr_cells[3].text = 'Expired'
-    hdr_cells[4].text = 'Damaged'
-    hdr_cells[5].text = 'Issues'
     
-    for item in summary_data:
-        row_cells = table.add_row().cells
-        row_cells[0].text = item['Category']
-        row_cells[1].text = str(item['Total Items'])
-        row_cells[2].text = str(item['Low Stock'])
-        row_cells[3].text = str(item['Expired'])
-        row_cells[4].text = str(item['Damaged'])
-        row_cells[5].text = str(item['Issues'])
+    # Header row
+    table.rows[0].cells[0].text = 'Metric'
+    table.rows[0].cells[1].text = 'Value'
+    
+    # Data rows
+    table.rows[1].cells[0].text = 'Total Inventory Items'
+    table.rows[1].cells[1].text = str(total_items)
+    
+    table.rows[2].cells[0].text = 'Items Low on Stock'
+    table.rows[2].cells[1].text = str(low_stock)
+    
+    table.rows[3].cells[0].text = 'Expired Items'
+    table.rows[3].cells[1].text = str(expired)
+    
+    table.rows[4].cells[0].text = 'Items Needing Attention'
+    table.rows[4].cells[1].text = str(damaged + issues)
     
     # Add detailed sections for each category
     for category in ["chemicals", "glassware", "equipment"]:
-        doc.add_heading(f"{category.capitalize()} Inventory", level=1)
+        doc.add_heading(f"{category.capitalize()} Inventory Details", level=1)
+        
         df = st.session_state.lab_inventory[category].copy()
         
-        if category == "chemicals":
-            if 'expiry' in df.columns:
-                df['expiry'] = pd.to_datetime(df['expiry']).dt.strftime('%Y-%m-%d')
+        # Add summary for the category
+        stats = calculate_category_stats(category)
         
-        # Create table
-        table = doc.add_table(rows=1, cols=len(df.columns)+1)
-        table.style = 'Table Grid'
+        # Create a table for category summary
+        cat_table = doc.add_table(rows=len(stats)+1, cols=2)
+        cat_table.style = 'Table Grid'
         
-        # Add headers
-        hdr_cells = table.rows[0].cells
-        for i, col in enumerate(df.columns):
-            hdr_cells[i].text = str(col)
+        # Header row
+        cat_table.rows[0].cells[0].text = 'Metric'
+        cat_table.rows[0].cells[1].text = 'Value'
         
-        # Add data rows with conditional formatting
-        for _, row in df.iterrows():
-            row_cells = table.add_row().cells
-            for i, col in enumerate(df.columns):
-                row_cells[i].text = str(row[col])
-                
-                # Apply color based on status
-                if 'status' in df.columns and col == 'status':
-                    if row['status'] == 'Low':
-                        for paragraph in row_cells[i].paragraphs:
-                            for run in paragraph.runs:
-                                run.font.color.rgb = RGBColor(0x80, 0x00, 0x00)  # Dark red
-                    elif row['status'] == 'Expired':
-                        for paragraph in row_cells[i].paragraphs:
-                            for run in paragraph.runs:
-                                run.font.color.rgb = RGBColor(0xFF, 0x00, 0x00)  # Bright red
-                    elif row['status'] == 'Damaged':
-                        for paragraph in row_cells[i].paragraphs:
-                            for run in paragraph.runs:
-                                run.font.color.rgb = RGBColor(0xFF, 0x00, 0x00)  # Bright red
-                    elif row['status'] in ['Needs service', 'In repair']:
-                        for paragraph in row_cells[i].paragraphs:
-                            for run in paragraph.runs:
-                                run.font.color.rgb = RGBColor(0x80, 0x80, 0x00)  # Dark yellow
+        # Data rows
+        for i, (key, value) in enumerate(stats.items(), start=1):
+            cat_table.rows[i].cells[0].text = key.replace('_', ' ').title()
+            cat_table.rows[i].cells[1].text = str(value)
     
-    # Save to BytesIO buffer
-    buffer = BytesIO()
+    # Save the document to the buffer
     doc.save(buffer)
     buffer.seek(0)
     return buffer
 
-def send_email_report(receiver_email, subject, body, attachment=None):
-    """Send inventory report via email with improved error handling"""
-    try:
-        # Verify email configuration exists
-        if "email" not in st.secrets:
-            st.error("Email configuration not found in secrets")
-            return False
-            
-        email_config = st.secrets["email"]
-        
-        # Validate required fields
-        required_fields = ["sender", "password", "smtp_server", "smtp_port"]
-        for field in required_fields:
-            if field not in email_config:
-                st.error(f"Missing required email configuration: {field}")
-                return False
-        
-        # Create message container
-        msg = MIMEMultipart()
-        msg['From'] = email_config["sender"]
-        msg['To'] = receiver_email
-        msg['Subject'] = subject
-        
-        # Attach body
-        msg.attach(MIMEText(body, 'plain'))
-        
-        # Attach file if provided
-        if attachment:
-            part = MIMEBase('application', 'octet-stream')
-            part.set_payload(attachment.read())
-            encoders.encode_base64(part)
-            part.add_header('Content-Disposition', 
-                          'attachment; filename="inventory_report.docx"')
-            msg.attach(part)
-        
-        # Connect to server and send email
-        try:
-            # Note: Using port 465 with SMTP_SSL instead of port 587 with starttls
-            with smtplib.SMTP_SSL(
-                email_config["smtp_server"], 
-                int(email_config["smtp_port"])
-            ) as server:
-                server.login(email_config["sender"], email_config["password"])
-                server.send_message(msg)
-                st.success("Email sent successfully!")
-                return True
-                
-        except smtplib.SMTPAuthenticationError:
-            st.error("Authentication failed. Please check your email and password.")
-            return False
-        except smtplib.SMTPException as e:
-            st.error(f"SMTP error occurred: {str(e)}")
-            return False
-            
-    except Exception as e:
-        st.error(f"Unexpected error occurred: {str(e)}")
-        return False
-
 def show_reporting_section():
-    """Display the reporting interface"""
-    st.header("📊 Inventory Reporting")
+    """Display the enhanced reporting interface"""
+    st.header("📑 Inventory Reporting")
     
-    with st.expander("📄 Generate Report", expanded=True):
-        report_type = st.selectbox("Select Report Type", 
-                                 ["Full Inventory", "Chemicals Only", "Glassware Only", "Equipment Only"])
+    with st.expander("📄 Generate Comprehensive Report", expanded=True):
+        report_type = st.selectbox(
+            "Select Report Type", 
+            ["Full Inventory Report", "Chemicals Report", "Glassware Report", "Equipment Report"]
+        )
         
         if st.button("Generate Report"):
             with st.spinner("Generating report..."):
-                report_buffer = generate_inventory_report()
+                report_buffer = generate_comprehensive_report()
                 st.success("Report generated successfully!")
                 
                 st.download_button(
@@ -1086,8 +1316,8 @@ def show_reporting_section():
                             else:
                                 st.error("Failed to send email")
     
-    with st.expander("📈 Visualizations", expanded=False):
-        st.subheader("Inventory Visualizations")
+    with st.expander("📊 Quick Visualizations", expanded=False):
+        st.subheader("Quick Inventory Visualizations")
         
         # Chemicals visualization
         if not st.session_state.lab_inventory["chemicals"].empty:
@@ -1117,54 +1347,38 @@ def show_reporting_section():
             st.plotly_chart(fig3, use_container_width=True)
 
 # ======================
-# Main Page
+# Updated Main Page
 # ======================
 
 def display_lab_inventory_page():
-    """Main inventory management interface"""
-    st.title("🧪 Laboratory Inventory Management")
+    """Main inventory management interface with enhanced visualization"""
+    st.title("🧪 Laboratory Inventory Management System")
     
     if 'lab_inventory' not in st.session_state:
         initialize_inventory_data()
     
-    # Display summary cards
-    st.subheader("Inventory Summary")
-    cols = st.columns(3)
-    
-    for i, category in enumerate(["chemicals", "glassware", "equipment"]):
-        stats = calculate_category_stats(category)
-        
-        with cols[i]:
-            container = st.container(border=True)
-            container.markdown(f"**{category.capitalize()}**")
-            container.metric("Total Items", stats['total'])
-            
-            if category == "chemicals":
-                container.metric("Low Stock", stats['low'], delta=f"-{stats['low']} items")
-                container.metric("Expired", stats['expired'], delta_color="inverse")
-            elif category == "glassware":
-                container.metric("Damaged", stats['damaged'], delta_color="inverse")
-            elif category == "equipment":
-                container.metric("Needs Attention", stats['issues'], delta_color="inverse")
-    
     # Navigation tabs
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📊 Dashboard", 
         "🧪 Chemicals", 
         "🧫 Glassware", 
         "⚙️ Equipment", 
-        "📊 Reports"
+        "📑 Reports"
     ])
     
     with tab1:
-        manage_chemicals()
+        display_inventory_dashboard()
     
     with tab2:
-        manage_glassware()
+        manage_chemicals()
     
     with tab3:
-        manage_equipment()
+        manage_glassware()
     
     with tab4:
+        manage_equipment()
+    
+    with tab5:
         show_reporting_section()
 
 if __name__ == "__main__":
