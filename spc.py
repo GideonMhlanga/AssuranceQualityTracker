@@ -3,7 +3,10 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from database import get_check_data
+from database import BeverageQADatabase  # Updated import
+
+# Initialize database connection
+db = BeverageQADatabase()
 
 def calculate_control_limits(data, column, n_sigma=3):
     """
@@ -278,8 +281,8 @@ def display_spc_dashboard(start_date, end_date, product_filter=None):
         end_date: End date for filtering data
         product_filter: Optional product filter
     """
-    # Get data
-    data = get_check_data(start_date, end_date, product_filter)
+    # Get data using the class method
+    data = db.get_check_data(start_date, end_date, product_filter)
     
     if data.empty:
         st.warning("No data available for the selected time period")
@@ -624,7 +627,7 @@ def display_spc_page():
     
     # Get data for filtering
     # First get all data to extract product list
-    all_data = get_check_data(
+    all_data = db.get_check_data(
         start_date="1900-01-01", 
         end_date="2100-01-01"
     )

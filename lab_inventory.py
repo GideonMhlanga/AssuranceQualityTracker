@@ -24,14 +24,23 @@ INVENTORY_CATEGORIES = {
     "equipment": ["Instrument", "Device", "Tool", "Machine"]
 }
 
+GLASSWARE_STATUS_OPTIONS = ["OK", "Broken", "Chipped", "Missing"]
+EQUIPMENT_STATUS_OPTIONS = ["Working", "Needs service", "Broken", "In repair", "Out for calibration"]
+
 # ======================
 # Utility Functions
 # ======================
 
 def validate_date(date_str):
-    """Validate date in YYYY-MM-DD format"""
+    """Validate date in YYYY-MM-DD format with additional checks"""
     try:
-        datetime.strptime(date_str, "%Y-%m-%d")
+        # First check the format
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+        
+        # Additional validation - date shouldn't be in the distant past
+        if date_obj.year < 2000:
+            return False
+            
         return True
     except ValueError:
         return False
@@ -198,12 +207,52 @@ def send_email_report(receiver_email, subject, body, attachment=None):
 
 def init_inventory_tables():
     """Initialize inventory tables in the database if they don't exist"""
-    conn = get_conn()
-    if conn:
-        try:
-            # SQL commands to create tables with proper numeric precision
-            table_creation_queries = [
-                """
+    conn = None
+    try:
+        conn = get_conn()
+        if not conn:
+            st.error("Database connection failed")
+            return False
+
+        # Start a transaction
+        with conn.begin():
+            # Create all tables first
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS glassware (
+                    id TEXT PRIMARY KEY,
+                    item TEXT UNIQUE NOT NULL,
+                    category TEXT NOT NULL,
+                    total_quantity INTEGER NOT NULL DEFAULT 1,
+                    broken_quantity INTEGER NOT NULL DEFAULT 0,
+                    current INTEGER GENERATED ALWAYS AS (total_quantity - broken_quantity) STORED,
+                    unit TEXT,
+                    location TEXT,
+                    comment TEXT,
+                    status TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS equipment (
+                    id TEXT PRIMARY KEY,
+                    item TEXT UNIQUE NOT NULL,
+                    category TEXT NOT NULL,
+                    total_quantity INTEGER NOT NULL DEFAULT 1,
+                    non_working_quantity INTEGER NOT NULL DEFAULT 0,
+                    working_quantity INTEGER GENERATED ALWAYS AS (total_quantity - non_working_quantity) STORED,
+                    unit TEXT,
+                    location TEXT,
+                    status TEXT,
+                    last_calibration DATE,
+                    comment TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            
+            conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS chemicals (
                     id TEXT PRIMARY KEY,
                     item TEXT UNIQUE NOT NULL,
@@ -221,42 +270,9 @@ def init_inventory_tables():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-                """,
-                """
-                CREATE TABLE IF NOT EXISTS glassware (
-                    id TEXT PRIMARY KEY,
-                    item TEXT UNIQUE NOT NULL,
-                    category TEXT NOT NULL,
-                    current INTEGER,
-                    unit TEXT,
-                    location TEXT,
-                    comment TEXT,
-                    status TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-                """,
-                """
-                CREATE TABLE IF NOT EXISTS equipment (
-                    id TEXT PRIMARY KEY,
-                    item TEXT UNIQUE NOT NULL,
-                    category TEXT NOT NULL,
-                    current INTEGER,
-                    unit TEXT,
-                    location TEXT,
-                    status TEXT,
-                    last_calibration TEXT,
-                    comment TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            ]
+            """))
             
-            for query in table_creation_queries:
-                conn.execute(text(query))
-            
-            # Add sequences for ID generation
+            # Create sequences for ID generation
             for category in ["chemicals", "glassware", "equipment"]:
                 conn.execute(text(f"""
                     CREATE SEQUENCE IF NOT EXISTS {category}_id_seq;
@@ -267,29 +283,12 @@ def init_inventory_tables():
                             WHEN '{category}' = 'equipment' THEN 'EQUIP-' || LPAD(nextval('{category}_id_seq')::text, 3, '0')
                         END;
                 """))
-                # Initialize sequence values
+                
                 conn.execute(text(f"""
                     SELECT setval('{category}_id_seq', 
                         COALESCE((SELECT MAX(SUBSTRING(id FROM '[0-9]+$')::int) FROM {category}), 0) + 1);
                 """))
             
-            # Check if Months Stock column exists and has correct type
-            result = conn.execute(text("""
-                SELECT data_type, numeric_precision, numeric_scale 
-                FROM information_schema.columns 
-                WHERE table_name='chemicals' AND column_name='Months Stock'
-            """)).fetchone()
-            
-            if not result or result[0] != 'numeric' or result[1] != 10 or result[2] != 2:
-                conn.execute(text("""
-                    ALTER TABLE chemicals 
-                    ALTER COLUMN "Months Stock" TYPE NUMERIC(10,2),
-                    ALTER COLUMN minimum TYPE NUMERIC(10,2),
-                    ALTER COLUMN current TYPE NUMERIC(10,2),
-                    ALTER COLUMN monthly TYPE NUMERIC(10,2)
-                """))
-                conn.commit()
-
             # Create triggers for each table
             for table in ["chemicals", "glassware", "equipment"]:
                 conn.execute(text(f"""
@@ -308,13 +307,14 @@ def init_inventory_tables():
                     BEFORE UPDATE ON {table}
                     FOR EACH ROW EXECUTE FUNCTION update_{table}_timestamp();
                 """))
-            
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            st.error(f"Error initializing tables: {e}")
-            raise e
-        finally:
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Error initializing tables: {e}")
+        return False
+    finally:
+        if conn:
             conn.close()
                 
 def load_from_db():
@@ -338,57 +338,114 @@ def load_from_db():
     return inventory
 
 def save_to_db(category, df):
-    """Save a DataFrame back to the database with proper date and numeric handling"""
-    conn = get_conn()
-    if conn:
-        try:
-            df_to_save = df.copy()
-            
-            if category == "chemicals" and 'expiry' in df_to_save.columns:
-                df_to_save['expiry'] = pd.to_datetime(
-                    df_to_save['expiry'], 
+    """Save a DataFrame back to the database with proper date and numeric handling
+    
+    Args:
+        category (str): Inventory category ('chemicals', 'glassware', 'equipment')
+        df (pd.DataFrame): DataFrame containing inventory data
+        
+    Raises:
+        ValueError: If date formats are invalid or data validation fails
+    """
+    conn = None
+    try:
+        conn = get_conn()
+        if not conn:
+            st.error("Database connection failed")
+            return False
+
+        df_to_save = df.copy()
+        
+        # =============================================
+        # Enhanced Date Handling
+        # =============================================
+        date_columns = {
+            'chemicals': ['expiry'],
+            'equipment': ['last_calibration']
+        }.get(category, [])
+        
+        for col in date_columns:
+            if col in df_to_save.columns:
+                # Convert to datetime and validate format
+                df_to_save[col] = pd.to_datetime(
+                    df_to_save[col], 
                     format='%Y-%m-%d', 
                     errors='coerce'
                 )
-                df_to_save = df_to_save[~df_to_save['expiry'].isna()]
-            
-            if category == "chemicals":
-                numeric_cols = ['minimum', 'current', 'monthly', 'Months Stock']
-                for col in numeric_cols:
-                    if col in df_to_save.columns:
-                        df_to_save[col] = (
-                            pd.to_numeric(df_to_save[col], errors='coerce')
-                            .round(2)
-                            .replace({np.nan: None})
-                        )
+                
+                # Check for invalid dates
+                invalid_dates = df_to_save[df_to_save[col].isna()]
+                if not invalid_dates.empty:
+                    st.error(f"Invalid {col} dates found in rows: {invalid_dates.index.tolist()}")
+                    st.error("Please use YYYY-MM-DD format for all dates")
+                    return False
+                
+                # Convert to date strings for database storage
+                df_to_save[col] = df_to_save[col].dt.strftime('%Y-%m-%d')
 
-            if category == "chemicals" and 'Months Stock' not in df_to_save.columns:
+        # =============================================
+        # Numeric Field Handling
+        # =============================================
+        if category == "chemicals":
+            numeric_cols = ['minimum', 'current', 'monthly', 'Months Stock']
+            for col in numeric_cols:
+                if col in df_to_save.columns:
+                    df_to_save[col] = (
+                        pd.to_numeric(df_to_save[col], errors='coerce')
+                        .round(2)
+                        .replace({np.nan: None})
+                    )
+            
+            # Recalculate months of stock if needed
+            if 'Months Stock' not in df_to_save.columns:
                 df_to_save['Months Stock'] = df_to_save.apply(
                     lambda row: round(calculate_months_of_stock(row), 2), 
                     axis=1
                 )
+
+        # =============================================
+        # Database Operations
+        # =============================================
+        with conn.begin():  # This handles transactions automatically
+            # Clear existing data
+            conn.execute(text(f"TRUNCATE TABLE {category} RESTART IDENTITY CASCADE"))
             
-            conn.execute(text(f"DELETE FROM {category}"))
-            
-            df_to_save.to_sql(
-                category, 
-                conn, 
-                if_exists='append', 
-                index=False,
-                dtype={
+            # Insert new data with explicit data types
+            dtype_mapping = {
+                'chemicals': {
                     'expiry': Date,
                     'Months Stock': Numeric(10,2),
                     'minimum': Numeric(10,2),
                     'current': Numeric(10,2),
                     'monthly': Numeric(10,2)
-                } if category == "chemicals" else None
+                },
+                'equipment': {
+                    'last_calibration': Date
+                }
+            }
+            
+            df_to_save.to_sql(
+                name=category,
+                con=conn,
+                if_exists='append',
+                index=False,
+                dtype=dtype_mapping.get(category, None)
             )
-            conn.commit()
-        except Exception as e:
+            
+        return True
+        
+    except ValueError as ve:
+        st.error(f"Data validation error: {str(ve)}")
+        if conn:
             conn.rollback()
-            st.error(f"Error saving {category} data: {e}")
-            raise e
-        finally:
+        return False
+    except Exception as e:
+        st.error(f"Database operation failed: {str(e)}")
+        if conn:
+            conn.rollback()
+        return False
+    finally:
+        if conn:
             conn.close()
 
 def insert_item(category, item_data):
@@ -402,6 +459,10 @@ def insert_item(category, item_data):
 
         if category == "chemicals" and "Months Stock" not in item_data:
             item_data["Months Stock"] = calculate_months_of_stock(item_data)
+
+        # Remove 'current' column for glassware since it's generated by the database
+        if category in ["glassware", "equipment"]  and "current" in item_data:
+            item_data.pop("current", None)
 
         columns = []
         placeholders = []
@@ -668,18 +729,19 @@ def manage_chemicals():
                 minimum_stock = st.number_input("Minimum Stock", min_value=0.0, step=0.1, format="%.2f")
                 current_stock = st.number_input("Current Stock", min_value=0.0, step=0.1, format="%.2f")
                 monthly_usage = st.number_input("Monthly Usage", min_value=0.0, step=0.1, format="%.2f")
-                unit = st.selectbox("Unit", ["g", "kg", "mL", "L", "tablets", "bottles"])
+                unit = st.selectbox("Unit", ["g", "kg", "mL", "L", "tablets", "bottles", "sachets", "units"])
             with cols[2]:
-                expiry_date = st.text_input("Expiry Date (YYYY-MM-DD)", placeholder="2025-12-31")
+                expiry_date = st.date_input(
+                    "Expiry Date",
+                    min_value=date(2000, 1, 1),
+                    format="YYYY-MM-DD"
+                ).strftime("%Y-%m-%d")  # Convert to string format
                 location = st.text_input("Storage Location")
                 supplier = st.text_input("Supplier")
                 comment = st.text_input("Comments")
             
             if st.form_submit_button("Add Chemical"):
-                if expiry_date and not validate_date(expiry_date):
-                    st.error("Invalid date format. Please use YYYY-MM-DD format.")
-                    st.stop()
-                
+                # Remove date validation since we're using date_input
                 existing_items = df['item'].str.lower().tolist()
                 if item_name.lower() in existing_items:
                     st.error(f"A chemical with the name '{item_name}' already exists in Inventory!")
@@ -692,7 +754,7 @@ def manage_chemicals():
                         "current": current_stock,
                         "monthly": monthly_usage,
                         "unit": unit,
-                        "expiry": expiry_date if expiry_date else None,
+                        "expiry": expiry_date,
                         "location": location,
                         "supplier": supplier,
                         "comment": comment,
@@ -726,6 +788,26 @@ def manage_chemicals():
                         st.rerun()
     
     st.subheader("Current Chemical Inventory")
+
+    # Define the styling function
+    def highlight_status(row):
+        styles = [''] * len(row)
+        if row['status'] == 'Expired':
+            styles = ['background-color: #F8D7DA'] * len(row)  # Light red for expired
+        elif row['status'] == 'Low':
+            styles = ['background-color: #FFF3CD'] * len(row)  # Light yellow for low stock
+        elif row['status'] == 'Critical':
+            styles = ['background-color: #FFCCCB'] * len(row)  # Light red-orange for critical
+        return styles
+    
+     # Display the styled dataframe
+    st.dataframe(
+        df.style.apply(highlight_status, axis=1),
+        use_container_width=True,
+        height=600,
+        column_order=['id', 'item', 'category', 'current', 'minimum', 'monthly', 'Months Stock', 'status', 'expiry']
+    )
+    
     edited_df = st.data_editor(
         df,
         num_rows="dynamic",
@@ -737,10 +819,11 @@ def manage_chemicals():
             "monthly": st.column_config.NumberColumn(format="%.2f"),
             "Months Stock": st.column_config.NumberColumn(format="%.2f"),
             "expiry": st.column_config.DateColumn(
-                "Expiry Date",
-                format="YYYY-MM-DD",
-                help="Format: YYYY-MM-DD"
-            ),
+            "Expiry Date",
+            format="YYYY-MM-DD",
+            min_value=date(2000, 1, 1),
+            help="Select expiry date from calendar"
+        ),
             "status": st.column_config.SelectboxColumn(
                 "Status",
                 options=["OK", "Low", "Critical", "Out of Stock", "Expired"],
@@ -769,6 +852,7 @@ def manage_chemicals():
                 axis=1
             )
         
+        
         save_to_db("chemicals", edited_df)
         st.session_state.lab_inventory["chemicals"] = pd.read_sql(
             text("SELECT * FROM chemicals"), 
@@ -778,7 +862,7 @@ def manage_chemicals():
         st.rerun()
 
 def manage_glassware():
-    """Glassware inventory management"""
+    """Glassware inventory management with broken items tracking"""
     df = st.session_state.lab_inventory["glassware"].copy()
     
     with st.expander("➕ Add New Glassware", expanded=False):
@@ -790,10 +874,14 @@ def manage_glassware():
                 item_name = st.text_input("Item Name", key="new_glass_name")
                 category = st.selectbox("Category", INVENTORY_CATEGORIES["glassware"])
             with cols[1]:
-                current_stock = st.number_input("Quantity", min_value=0, step=1, format="%d")
+                total_quantity = st.number_input("Total Quantity", min_value=0, step=1, value=1)
+                broken_quantity = st.number_input("Broken Quantity", min_value=0, step=1, value=0)
+                usable_quantity = total_quantity - broken_quantity
+                st.text_input("Usable Quantity", value=usable_quantity, disabled=True)
                 unit = st.selectbox("Unit", ["pieces", "sets", "units"])
             with cols[2]:
                 location = st.text_input("Storage Location")
+                status = st.selectbox("Status", GLASSWARE_STATUS_OPTIONS)
                 comment = st.text_input("Comments")
             
             if st.form_submit_button("Add Glassware"):
@@ -805,25 +893,14 @@ def manage_glassware():
                         "id": new_id,
                         "item": item_name,
                         "category": category,
-                        "current": current_stock,
+                        "total_quantity": total_quantity,
+                        "broken_quantity": broken_quantity,
+                        # Remove "current": usable_quantity since it's generated by the database
                         "unit": unit,
                         "location": location,
-                        "comment": comment,
-                        "status": "OK"
+                        "status": status if broken_quantity > 0 else "OK",
+                        "comment": comment
                     }
-                    
-                    # Double-check ID doesn't exist
-                    conn = get_conn()
-                    if conn:
-                        existing_id = conn.execute(
-                            text("SELECT id FROM glassware WHERE id = :id"),
-                            {"id": new_id}
-                        ).fetchone()
-                        
-                        if existing_id:
-                            st.error(f"ID {new_id} already exists! Generating new ID...")
-                            new_id = generate_unique_id("glassware")
-                            new_item["id"] = new_id
                     
                     result = insert_item("glassware", new_item)
                     if result:
@@ -835,21 +912,106 @@ def manage_glassware():
                         st.rerun()
     
     st.subheader("Current Glassware Inventory")
+    
+    # Add filtering options
+    col1, col2 = st.columns(2)
+    with col1:
+        filter_status = st.selectbox(
+            "Filter by Status",
+            ["All"] + GLASSWARE_STATUS_OPTIONS,
+            key="glassware_status_filter"
+        )
+    with col2:
+        search_term = st.text_input("Search Glassware", key="glassware_search")
+    
+    # Apply filters
+    filtered_df = df.copy()
+    if filter_status != "All":
+        filtered_df = filtered_df[filtered_df["status"] == filter_status]
+    if search_term:
+        filtered_df = filtered_df[
+            filtered_df["item"].str.contains(search_term, case=False) |
+            filtered_df["id"].str.contains(search_term, case=False)
+        ]
+
+    # Enhanced row styling function
+    def highlight_glassware_issues(row):
+        styles = [''] * len(row)
+        
+        # Highlight zero quantity items
+        if row.get('current', 0) <= 0:
+            styles = ['background-color: #FFCCCC'] * len(row)  # Light red for zero quantity
+        
+        # Highlight different statuses with different colors
+        status = row.get('status', '').lower()
+        if 'broken' in status:
+            styles = ['background-color: #FF9999'] * len(row)  # Stronger red for broken
+        elif 'chipped' in status:
+            styles = ['background-color: #FFCC99'] * len(row)  # Orange for chipped
+        elif 'missing' in status:
+            styles = ['background-color: #FFFF99'] * len(row)  # Yellow for missing
+        
+        return styles
+    
+    # Display the styled dataframe first for better visibility
+    st.dataframe(
+        filtered_df.style.apply(highlight_glassware_issues, axis=1),
+        use_container_width=True,
+        height=600,
+        column_order=['id', 'item', 'category', 'total_quantity', 'broken_quantity', 'current', 'status', 'location']
+    )
+    
+    # Enhanced data editor with broken quantity tracking
     edited_df = st.data_editor(
-        df,
+        filtered_df,
         num_rows="dynamic",
         use_container_width=True,
-        disabled=["id"],
+        disabled=["id", "current"],
         column_config={
             "status": st.column_config.SelectboxColumn(
                 "Status",
-                options=["OK", "Damaged"],
+                options=GLASSWARE_STATUS_OPTIONS,
                 required=True
+            ),
+            "total_quantity": st.column_config.NumberColumn(
+                "Total Qty",
+                min_value=0,
+                step=1
+            ),
+            "broken_quantity": st.column_config.NumberColumn(
+                "Broken Qty",
+                min_value=0,
+                step=1
+            ),
+            "current": st.column_config.NumberColumn(
+                "Usable Qty",
+                help="Automatically calculated as Total - Broken"
             )
         }
     )
     
+    # Update status based on broken quantity (but don't update current in the DataFrame)
+    if "broken_quantity" in edited_df.columns:
+        edited_df["status"] = np.where(
+            edited_df["broken_quantity"] > 0,
+            "Broken",
+            "OK"
+        )
+    
+    # Update status based on broken quantity (but don't update current in the DataFrame)
+    if "broken_quantity" in edited_df.columns:
+        # Only update status if it's not already set to a specific condition
+        edited_df["status"] = np.where(
+            (edited_df["broken_quantity"] > 0) & (edited_df["status"] == "OK"),
+            "Broken",
+            edited_df["status"]
+        )
+
     if st.button("Save Glassware Changes"):
+        # Remove the 'current' column before saving since it's generated by the database
+        if 'current' in edited_df.columns:
+            edited_df = edited_df.drop(columns=['current'])
+        
         save_to_db("glassware", edited_df)
         st.session_state.lab_inventory["glassware"] = pd.read_sql(
             text("SELECT * FROM glassware"), 
@@ -859,8 +1021,16 @@ def manage_glassware():
         st.rerun()
 
 def manage_equipment():
-    """Equipment inventory management"""
+    """Equipment inventory management with non-working items tracking"""
     df = st.session_state.lab_inventory["equipment"].copy()
+    
+    # Convert string dates to datetime objects if they exist
+    if 'last_calibration' in df.columns:
+        df['last_calibration'] = pd.to_datetime(
+            df['last_calibration'], 
+            format='%Y-%m-%d', 
+            errors='coerce'
+        )
     
     with st.expander("➕ Add New Equipment", expanded=False):
         with st.form("add_equipment_form"):
@@ -871,19 +1041,23 @@ def manage_equipment():
                 item_name = st.text_input("Item Name", key="new_equip_name")
                 category = st.selectbox("Category", INVENTORY_CATEGORIES["equipment"])
             with cols[1]:
-                current_stock = st.number_input("Quantity", min_value=0, step=1, format="%d")
+                total_quantity = st.number_input("Total Quantity", min_value=1, step=1, value=1)
+                non_working_quantity = st.number_input("Non-Working Quantity", min_value=0, step=1, value=0, 
+                                                     max_value=total_quantity)
+                working_quantity = total_quantity - non_working_quantity
+                st.text_input("Working Quantity", value=working_quantity, disabled=True)
                 unit = st.selectbox("Unit", ["units", "sets"])
-                last_calibration = st.text_input("Last Calibration (YYYY-MM-DD)", placeholder="2024-01-01")
             with cols[2]:
                 location = st.text_input("Storage Location")
-                status = st.selectbox("Status", ["Working", "Needs service", "In repair"])
+                status = st.selectbox("Status", ["Working", "Needs service", "In repair", "Broken", "Out for calibration"])
+                last_calibration = st.date_input(
+                    "Last Calibration Date",
+                    value=datetime.now().date() - timedelta(days=30),
+                    format="YYYY-MM-DD"
+                )
                 comment = st.text_input("Comments")
             
             if st.form_submit_button("Add Equipment"):
-                if last_calibration and not validate_date(last_calibration):
-                    st.error("Invalid date format. Please use YYYY-MM-DD format.")
-                    st.stop()
-                
                 existing_items = df['item'].str.lower().tolist()
                 if item_name.lower() in existing_items:
                     st.error(f"An equipment item with the name '{item_name}' already exists in Inventory!")
@@ -892,11 +1066,12 @@ def manage_equipment():
                         "id": new_id,
                         "item": item_name,
                         "category": category,
-                        "current": current_stock,
+                        "total_quantity": total_quantity,
+                        "non_working_quantity": non_working_quantity,
                         "unit": unit,
                         "location": location,
                         "status": status,
-                        "last_calibration": last_calibration,
+                        "last_calibration": last_calibration.strftime('%Y-%m-%d'),
                         "comment": comment
                     }
                     
@@ -923,6 +1098,36 @@ def manage_equipment():
                         st.rerun()
     
     st.subheader("Current Equipment Inventory")
+    
+    # Enhanced row styling function for equipment
+    def highlight_equipment_issues(row):
+        styles = [''] * len(row)
+        
+        # Highlight different statuses with different colors
+        status = row.get('status', '').lower()
+        non_working = row.get('non_working_quantity', 0)
+        total = row.get('total_quantity', 1)
+        
+        if non_working == total:  # All items non-working
+            styles = ['background-color: #FF9999'] * len(row)  # Strong red
+        elif non_working > 0:     # Some items non-working
+            styles = ['background-color: #FFCC99'] * len(row)  # Orange
+        elif 'broken' in status:
+            styles = ['background-color: #FF9999'] * len(row)  # Strong red
+        elif 'repair' in status or 'service' in status or 'calibration' in status:
+            styles = ['background-color: #FFFF99'] * len(row)  # Yellow
+        
+        return styles
+    
+    # Display the styled dataframe first for better visibility
+    st.dataframe(
+        df.style.apply(highlight_equipment_issues, axis=1),
+        use_container_width=True,
+        height=600,
+        column_order=['id', 'item', 'category', 'total_quantity', 'non_working_quantity', 'status', 'last_calibration']
+    )
+    
+    # Enhanced data editor with non-working quantity tracking
     edited_df = st.data_editor(
         df,
         num_rows="dynamic",
@@ -931,28 +1136,35 @@ def manage_equipment():
         column_config={
             "status": st.column_config.SelectboxColumn(
                 "Status",
-                options=["Working", "Needs service", "In repair"],
-                required=True
+                options=["Working", "Needs service", "In repair", "Broken", "Out for calibration"],
+                required=True,
+                help="Current operational status of the equipment"
             ),
-            "last_calibration": st.column_config.TextColumn(
+            "total_quantity": st.column_config.NumberColumn(
+                "Total Qty",
+                min_value=1,
+                step=1,
+                help="Total number of this equipment including non-working units"
+            ),
+            "non_working_quantity": st.column_config.NumberColumn(
+                "Non-Working Qty",
+                min_value=0,
+                step=1,
+                help="Number of non-functional units"
+            ),
+            "last_calibration": st.column_config.DateColumn(
                 "Last Calibration",
-                help="Format: YYYY-MM-DD",
-                validate="^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[1-2][0-9]|3[0-1])$"
+                format="YYYY-MM-DD",
+                min_value=date(2000, 1, 1),
+                help="Select last calibration date from calendar"
             )
         }
     )
     
     if st.button("Save Equipment Changes"):
+        # Convert datetime back to strings before saving
         if 'last_calibration' in edited_df.columns:
-            edited_df['last_calibration'] = pd.to_datetime(
-                edited_df['last_calibration'], 
-                format='%Y-%m-%d', 
-                errors='coerce'
-            )
-            invalid_dates = edited_df[edited_df['last_calibration'].isna()]
-            if not invalid_dates.empty:
-                st.error("Some calibration dates are invalid. Please use YYYY-MM-DD format.")
-                st.stop()
+            edited_df['last_calibration'] = edited_df['last_calibration'].dt.strftime('%Y-%m-%d')
         
         save_to_db("equipment", edited_df)
         st.session_state.lab_inventory["equipment"] = pd.read_sql(

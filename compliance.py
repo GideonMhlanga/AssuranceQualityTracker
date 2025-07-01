@@ -6,10 +6,13 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import io
 import base64
-from database import get_check_data
+from database import BeverageQADatabase  # Updated import
 from capability import calculate_process_capability
 from spc import calculate_control_limits
 from utils import format_timestamp
+
+# Initialize database connection
+db = BeverageQADatabase()
 
 def generate_compliance_report(start_date, end_date, product_filter=None, report_type="GMP", facility_name=None, report_number=None):
     """
@@ -26,8 +29,12 @@ def generate_compliance_report(start_date, end_date, product_filter=None, report
     Returns:
         DataFrame with report data and metadata
     """
-    # Get data for the reporting period
-    data = get_check_data(start_date, end_date, product_filter)
+    # Get data for the reporting period using the class method
+    data = db.get_check_data(
+        start_date=start_date,
+        end_date=end_date,
+        product_filter=product_filter if product_filter != ["All"] else None
+    )
     
     if data.empty:
         return None
@@ -109,50 +116,107 @@ def generate_compliance_report(start_date, end_date, product_filter=None, report
     
     return report_results
 
-def create_compliance_summary_chart(compliance_metrics):
-    """
-    Create a gauge chart for compliance rate
+def create_compliance_summary_chart(compliance_metrics, data):
+    """Display a summary compliance report"""
+    st.subheader("Compliance Summary Report")
     
-    Args:
-        compliance_metrics: Dictionary with compliance metrics
-        
-    Returns:
-        Plotly figure object
-    """
-    compliance_rate = compliance_metrics.get("compliance_rate", 0)
+    # Calculate basic statistics
+    total_checks = len(data)
+    unique_products = data['product'].nunique() if 'product' in data.columns else 0
+    unique_inspectors = data['username'].nunique()
     
-    fig = go.Figure(go.Indicator(
-        mode = "gauge+number",
-        value = compliance_rate,
-        domain = {'x': [0, 1], 'y': [0, 1]},
-        title = {'text': "Compliance Rate"},
-        gauge = {
-            'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
-            'bar': {'color': "darkblue"},
-            'bgcolor': "white",
-            'borderwidth': 2,
-            'bordercolor': "gray",
-            'steps': [
-                {'range': [0, 70], 'color': 'red'},
-                {'range': [70, 90], 'color': 'orange'},
-                {'range': [90, 100], 'color': 'green'}
-            ],
-            'threshold': {
-                'line': {'color': "red", 'width': 4},
-                'thickness': 0.75,
-                'value': 90
-            }
-        }
-    ))
+    # Display summary metrics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Checks", total_checks)
+    with col2:
+        st.metric("Unique Products", unique_products)
+    with col3:
+        st.metric("Unique Inspectors", unique_inspectors)
     
-    fig.update_layout(
-        height=300,
-        margin=dict(l=20, r=20, t=50, b=20)
-    )
+    # Product distribution
+    if 'product' in data.columns:
+        st.markdown("#### Product Distribution")
+        product_counts = data['product'].value_counts().reset_index()
+        product_counts.columns = ['Product', 'Count']
+        st.bar_chart(product_counts.set_index('Product'))
     
-    return fig
+    # Check type distribution
+    if 'source' in data.columns:
+        st.markdown("#### Check Type Distribution")
+        check_type_counts = data['source'].value_counts().reset_index()
+        check_type_counts.columns = ['Check Type', 'Count']
+        st.bar_chart(check_type_counts.set_index('Check Type'))
 
-def display_compliance_metrics_section(compliance_metrics):
+def display_detailed_report(data):
+    """Display a detailed compliance report"""
+    st.subheader("Detailed Compliance Report")
+    
+    # Show all checks in a table
+    st.dataframe(data, use_container_width=True)
+    
+    # Add download button
+    csv = data.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="Download as CSV",
+        data=csv,
+        file_name="compliance_report.csv",
+        mime="text/csv"
+    )
+
+def display_non_compliance_report(data):
+    """Display a report of non-compliant checks"""
+    st.subheader("Non-Compliance Report")
+    
+    # Identify non-compliant checks
+    non_compliant = pd.DataFrame()
+    
+    # Check for torque issues
+    if 'source' in data.columns and 'torque_tamper' in data['source'].values:
+        torque_data = data[data['source'] == 'torque_tamper']
+        for head in ['head1_torque', 'head2_torque', 'head3_torque', 'head4_torque', 'head5_torque']:
+            if head in torque_data.columns:
+                out_of_spec = torque_data[
+                    (torque_data[head] < 5) | (torque_data[head] > 12)
+                ]
+                if not out_of_spec.empty:
+                    non_compliant = pd.concat([non_compliant, out_of_spec])
+    
+    # Check for tamper evidence issues
+    if 'tamper_evidence' in data.columns:
+        tamper_issues = data[data['tamper_evidence'] == 'FAIL']
+        if not tamper_issues.empty:
+            non_compliant = pd.concat([non_compliant, tamper_issues])
+    
+    # Check for quality check issues
+    quality_params = [
+        'label_application', 'torque_test', 'pallet_check', 
+        'date_code', 'odour', 'appearance', 'product_taste',
+        'filler_height', 'bottle_check', 'bottle_seams',
+        'container_rinse_inspection', 'container_rinse_water_odour'
+    ]
+    
+    for param in quality_params:
+        if param in data.columns:
+            issues = data[data[param] == 'Not OK']
+            if not issues.empty:
+                non_compliant = pd.concat([non_compliant, issues])
+    
+    if non_compliant.empty:
+        st.success("No non-compliant checks found!")
+    else:
+        st.dataframe(non_compliant, use_container_width=True)
+        
+        # Add download button
+        csv = non_compliant.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download Non-Compliant Checks",
+            data=csv,
+            file_name="non_compliant_checks.csv",
+            mime="text/csv"
+        )
+
+def display_compliance_metrics_section(compliance_metrics, data):
     """
     Display compliance metrics in a formatted section
     

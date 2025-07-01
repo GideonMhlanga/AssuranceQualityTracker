@@ -3,8 +3,11 @@ import pandas as pd
 import datetime as dt
 import io
 import base64
-from database import get_check_data
+from database import BeverageQADatabase  # Updated import
 from utils import format_timestamp
+
+# Initialize database connection
+db = BeverageQADatabase()
 
 def generate_report(start_date, end_date):
     """
@@ -17,8 +20,8 @@ def generate_report(start_date, end_date):
     Returns:
         DataFrame with report data
     """
-    # Get all check data for the period
-    all_data = get_check_data(start_date, end_date)
+    # Get all check data for the period using the class method
+    all_data = db.get_check_data(start_date, end_date)
     
     if all_data.empty:
         return None
