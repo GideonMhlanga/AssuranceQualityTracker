@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
 from dotenv import load_dotenv
 from datetime import datetime
-
+import json
 
 # Set up logging configuration
 logging.basicConfig(
@@ -124,26 +124,33 @@ class BeverageQADatabase:
         logger.info("Initializing database tables")
         with self.get_engine().connect() as conn:
             try:
-                # Create users table (if it doesn't exist)
+                # Create users table with role and permissions
                 conn.execute(text('''
                 CREATE TABLE IF NOT EXISTS users (
                     username TEXT PRIMARY KEY,
                     password_hash TEXT NOT NULL,
-                    created_at TIMESTAMP NOT NULL,
-                    last_login TIMESTAMP
+                    role TEXT NOT NULL DEFAULT 'operator',
+                    permissions JSONB,
+                    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    last_login TIMESTAMP,
+                    last_tab TEXT DEFAULT 'Dashboard'
                 )
                 '''))
                 
-                # Add last_tab column if it doesn't exist
-                try:
-                    conn.execute(text('''
-                    ALTER TABLE users ADD COLUMN IF NOT EXISTS last_tab TEXT DEFAULT 'Dashboard'
-                    '''))
-                    logger.info("Added last_tab column to users table")
-                except Exception as alter_error:
-                    logger.error(f"Failed to add last_tab column: {alter_error}")
-                    raise
-
+                # Add the permissions column if it doesn't exist
+                conn.execute(text('''
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name='users' AND column_name='permissions'
+                    ) THEN
+                        ALTER TABLE users ADD COLUMN permissions JSONB;
+                    END IF;
+                END $$;
+                '''))
+                
                 # Create torque_tamper table
                 conn.execute(text('''
                 CREATE TABLE IF NOT EXISTS torque_tamper (
@@ -222,6 +229,68 @@ class BeverageQADatabase:
                     container_rinse_water_odour TEXT,
                     comments TEXT,
                     FOREIGN KEY (username) REFERENCES users(username)
+                )
+                '''))
+                
+                # Create SPC data table
+                conn.execute(text('''
+                CREATE TABLE IF NOT EXISTS spc_data (
+                    id SERIAL PRIMARY KEY,
+                    check_id TEXT NOT NULL,
+                    check_type TEXT NOT NULL,
+                    parameter TEXT NOT NULL,
+                    value FLOAT NOT NULL,
+                    timestamp TIMESTAMP NOT NULL,
+                    username TEXT NOT NULL,
+                    FOREIGN KEY (username) REFERENCES users(username)
+                )
+                '''))
+                
+                # Create capability data table
+                conn.execute(text('''
+                CREATE TABLE IF NOT EXISTS capability_data (
+                    id SERIAL PRIMARY KEY,
+                    product TEXT NOT NULL,
+                    parameter TEXT NOT NULL,
+                    cp FLOAT,
+                    cpk FLOAT,
+                    pp FLOAT,
+                    ppk FLOAT,
+                    sigma FLOAT,
+                    timestamp TIMESTAMP NOT NULL,
+                    username TEXT NOT NULL,
+                    FOREIGN KEY (username) REFERENCES users(username)
+                )
+                '''))
+                
+                # Create shift handover table
+                conn.execute(text('''
+                CREATE TABLE IF NOT EXISTS shift_handover (
+                    id SERIAL PRIMARY KEY,
+                    shift TEXT NOT NULL,
+                    handover_from TEXT NOT NULL,
+                    handover_to TEXT NOT NULL,
+                    timestamp TIMESTAMP NOT NULL,
+                    notes TEXT,
+                    issues TEXT,
+                    actions TEXT,
+                    FOREIGN KEY (handover_from) REFERENCES users(username),
+                    FOREIGN KEY (handover_to) REFERENCES users(username)
+                )
+                '''))
+                
+                # Create lab inventory table
+                conn.execute(text('''
+                CREATE TABLE IF NOT EXISTS lab_inventory (
+                    id SERIAL PRIMARY KEY,
+                    item_name TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    unit TEXT NOT NULL,
+                    location TEXT,
+                    last_checked TIMESTAMP,
+                    checked_by TEXT,
+                    notes TEXT,
+                    FOREIGN KEY (checked_by) REFERENCES users(username)
                 )
                 '''))
                 
@@ -312,17 +381,143 @@ class BeverageQADatabase:
 
     # Data Retrieval
     def get_all_users_data(self):
-        """Get all users data for user management"""
+        """
+        Retrieve all users data with robust permission handling
+        
+        Returns:
+            pd.DataFrame: Columns - username, role, created_at, last_login, permissions
+                        Empty DataFrame on error with consistent columns
+        """
+        # Define consistent columns for all return paths
+        result_columns = ['username', 'role', 'created_at', 'last_login', 'permissions']
+        
         with self.get_engine().connect() as conn:
             try:
-                result = conn.execute(text("SELECT username, created_at, last_login FROM users"))
-                return pd.DataFrame(result.fetchall(), columns=result.keys())
+                # Execute query with explicit column selection
+                result = conn.execute(text("""
+                SELECT 
+                    username, 
+                    role, 
+                    created_at, 
+                    last_login,
+                    CASE 
+                        WHEN permissions IS NULL THEN '{}'::jsonb
+                        ELSE permissions
+                    END AS permissions
+                FROM users
+                ORDER BY username ASC
+                """))
+                
+                # Process results efficiently
+                users_data = []
+                for row in result.mappings():  # Get rows as dictionaries
+                    try:
+                        # Handle permissions conversion
+                        permissions = row['permissions']
+                        if isinstance(permissions, str):
+                            permissions = json.loads(permissions)
+                        
+                        users_data.append({
+                            'username': row['username'],
+                            'role': row['role'],
+                            'created_at': row['created_at'],
+                            'last_login': row['last_login'],
+                            'permissions': permissions or {}  # Ensure dict
+                        })
+                    except (json.JSONDecodeError, KeyError) as e:
+                        logger.warning(f"Permission parsing error for user {row.get('username')}: {e}")
+                        continue
+                
+                # Create DataFrame with consistent structure
+                if users_data:
+                    return pd.DataFrame(users_data, columns=result_columns)
+                
+                return pd.DataFrame(columns=result_columns)
+                
             except Exception as e:
-                st.error(f"Error retrieving users: {e}")
+                logger.error(f"Database error in get_all_users_data: {str(e)}")
+                st.error("Error retrieving user data. Please try again.")
+                return pd.DataFrame(columns=result_columns)
+        
+    def update_user_permissions(self, username, permissions):
+        """Update a user's permissions"""
+        with self.get_engine().connect() as conn:
+            try:
+                conn.execute(
+                    text("UPDATE users SET permissions = :permissions WHERE username = :username"),
+                    {
+                        'permissions': json.dumps(permissions),
+                        'username': username
+                    }
+                )
+                conn.commit()
+                return True
+            except Exception as e:
+                conn.rollback()
+                st.error(f"Error updating user permissions: {e}")
+                return False
+            
+    def get_user_checks(self, username, limit=10):
+        """Get recent checks for a specific user"""
+        with self.get_engine().connect() as conn:
+            try:
+                result = conn.execute(text("""
+                SELECT check_id, 'Torque & Tamper' as check_type, username, timestamp,
+                       NULL as trade_name, NULL as product
+                FROM torque_tamper
+                WHERE username = :username
+                UNION ALL
+                SELECT check_id, 'Net Content' as check_type, username, timestamp,
+                      NULL as trade_name, NULL as product
+                FROM net_content
+                WHERE username = :username
+                UNION ALL
+                SELECT check_id, '30-Min Check' as check_type, username, timestamp,
+                       trade_name, product
+                FROM quality_check
+                WHERE username = :username
+                ORDER BY timestamp DESC
+                LIMIT :limit
+                """), {'username': username, 'limit': limit})
+                
+                df = pd.DataFrame(result.fetchall(), columns=result.keys())
+                if not df.empty:
+                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                return df
+            except Exception as e:
+                st.error(f"Error retrieving user checks: {e}")
+                return pd.DataFrame()
+
+    def get_public_checks(self, limit=5):
+        """Get public checks (limited information)"""
+        with self.get_engine().connect() as conn:
+            try:
+                result = conn.execute(text("""
+                SELECT check_id, 'Torque & Tamper' as check_type, timestamp,
+                       NULL as trade_name, NULL as product
+                FROM torque_tamper
+                UNION ALL
+                SELECT check_id, 'Net Content' as check_type, timestamp,
+                      NULL as trade_name, NULL as product
+                FROM net_content
+                UNION ALL
+                SELECT check_id, '30-Min Check' as check_type, timestamp,
+                       trade_name, product
+                FROM quality_check
+                ORDER BY timestamp DESC
+                LIMIT :limit
+                """), {'limit': limit})
+                
+                df = pd.DataFrame(result.fetchall(), columns=result.keys())
+                if not df.empty:
+                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                return df
+            except Exception as e:
+                st.error(f"Error retrieving public checks: {e}")
                 return pd.DataFrame()
 
     def get_recent_checks(self, limit=10):
-        """Get recent checks from all tables"""
+        """Get recent checks from all tables (full access)"""
         with self.get_engine().connect() as conn:
             try:
                 result = conn.execute(text("""
@@ -455,14 +650,16 @@ class BeverageQADatabase:
         logger.info("Attempting database repair")
         with self.get_engine().connect() as conn:
             try:
-                # Ensure last_tab column exists
+                # Ensure all required columns exist
                 conn.execute(text('''
                 DO $$
                 BEGIN
                     BEGIN
-                        ALTER TABLE users ADD COLUMN last_tab TEXT DEFAULT 'Dashboard';
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'operator';
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions JSONB;
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS last_tab TEXT DEFAULT 'Dashboard';
                         EXCEPTION WHEN duplicate_column THEN 
-                        RAISE NOTICE 'column last_tab already exists in users';
+                        RAISE NOTICE 'columns already exist in users';
                     END;
                 END $$;
                 '''))
@@ -475,86 +672,314 @@ class BeverageQADatabase:
                 conn.rollback()
                 return False
         
-    def create_user(self, username, password_hash, role='operator'):
-        """Enhanced user creation with Neon-specific handling"""
+    def create_user(self, username, password_hash, role='operator', permissions=None):
+        """
+        Enhanced user creation with role and permissions validation
+        
+        Args:
+            username (str): Unique username (3-20 chars)
+            password_hash (str): Hashed password
+            role (str): User role (admin/supervisor/operator/viewer)
+            permissions (dict, optional): Custom permissions dictionary
+        
+        Returns:
+            tuple: (success: bool, message: str)
+        """
+        # Input validation
+        if not isinstance(username, str) or not 3 <= len(username) <= 20:
+            return False, "Username must be 3-20 characters"
+        
+        if not isinstance(password_hash, str) or not password_hash:
+            return False, "Invalid password hash"
+        
+        # Role validation
+        valid_roles = ['admin', 'supervisor', 'operator', 'viewer']
+        if role not in valid_roles:
+            return False, f"Invalid role. Must be one of: {', '.join(valid_roles)}"
+        
+        # Set default permissions based on role if not provided
+        if permissions is None:
+            permissions = {
+                'view_all_data': role in ['admin', 'supervisor'],
+                'edit_all_data': role == 'admin',
+                'edit_own_data': role in ['admin', 'supervisor', 'operator'],
+                'manage_users': role == 'admin',
+                'add_comments': role in ['admin', 'supervisor', 'operator'],
+                'export_data': role in ['admin', 'supervisor'],
+                'access_reports': True,
+                'access_analytics': role != 'viewer'
+            }
+        elif not isinstance(permissions, dict):
+            return False, "Permissions must be a dictionary"
+        
+        try:
+            # Serialize permissions to JSON
+            permissions_json = json.dumps(permissions)
+        except (TypeError, ValueError) as e:
+            return False, f"Invalid permissions format: {str(e)}"
+        
         with self.get_engine().connect() as conn:
             try:
-                with conn.begin():  # Explicit transaction
-                    # Check existence
-                    exists = conn.execute(
+                with conn.begin():  # Transaction block
+                    # Check for existing user
+                    if conn.execute(
                         text("SELECT 1 FROM users WHERE username = :username"),
-                        {'username': username}
-                    ).scalar()
+                        {'username': username.strip().lower()}
+                    ).scalar():
+                        return False, "Username already exists"
                     
-                    if exists:
-                        return False
-                    
-                    # Create user
-                    conn.execute(
+                    # Create new user
+                    result = conn.execute(
                         text("""
-                        INSERT INTO users (username, password_hash, role, created_at, last_tab)
-                        VALUES (:username, :password_hash, :role, NOW(), 'Dashboard')
+                        INSERT INTO users (
+                            username, 
+                            password_hash, 
+                            role, 
+                            permissions, 
+                            created_at, 
+                            last_tab
+                        ) VALUES (
+                            :username, 
+                            :password_hash, 
+                            :role, 
+                            :permissions, 
+                            NOW(), 
+                            'Dashboard'
+                        )
+                        RETURNING username, role, created_at
                         """),
                         {
-                            'username': username,
+                            'username': username.strip(),
                             'password_hash': password_hash,
-                            'role': role
+                            'role': role.lower(),
+                            'permissions': permissions_json
                         }
                     )
                     
-                    # Immediate verification within same transaction
-                    created = conn.execute(
-                        text("SELECT username FROM users WHERE username = :username"),
-                        {'username': username}
-                    ).fetchone()
-                    
-                    return bool(created)
+                    # Verify creation
+                    if result.fetchone():
+                        return True, f"User '{username}' created successfully as {role}"
+                    return False, "Failed to create user"
                     
             except Exception as e:
-                st.error(f"User creation error: {e}")
-                return False
-            
+                error_type = e.__class__.__name__
+                error_details = str(e)
+                
+                # Handle specific error cases
+                if "permissions" in error_details.lower():
+                    return False, "Invalid permissions format"
+                elif "unique" in error_details.lower():
+                    return False, "Username already exists"
+                elif "connection" in error_details.lower():
+                    return False, "Database connection error"
+                
+                # Generic error message
+                logger.error(f"User creation failed ({error_type}): {error_details}")
+                return False, f"System error: {error_details}"
+                
     def get_user(self, username):
         """Get user details with error handling"""
         with self.get_engine().connect() as conn:
             try:
                 result = conn.execute(
-                    text("SELECT * FROM users WHERE username = :username"),
+                    text("""
+                    SELECT 
+                        username, 
+                        password_hash, 
+                        role, 
+                        COALESCE(permissions, '{}'::jsonb) as permissions,
+                        created_at,
+                        last_login,
+                        last_tab
+                    FROM users 
+                    WHERE username = :username
+                    """),
                     {'username': username}
                 )
-                return result.fetchone()
+                user = result.fetchone()
+                
+                if user:
+                    # Convert permissions JSONB to Python dict if it's a string
+                    permissions = user.permissions
+                    if isinstance(permissions, str):
+                        try:
+                            permissions = json.loads(permissions)
+                        except json.JSONDecodeError:
+                            permissions = {}
+                    
+                    return {
+                        'username': user.username,
+                        'password_hash': user.password_hash,
+                        'role': user.role,
+                        'permissions': permissions,
+                        'created_at': user.created_at,
+                        'last_login': user.last_login,
+                        'last_tab': user.last_tab
+                    }
+                return None
+                
             except Exception as e:
                 st.error(f"Error fetching user: {e}")
                 return None
             
     def get_user_last_tab(self, username):
-        """Get the last visited tab for a user"""
-        with self.get_engine().connect() as conn:
-            try:
-                result = conn.execute(
-                    text("SELECT last_tab FROM users WHERE username = :username"),
-                    {'username': username}
-                )
-                row = result.fetchone()
-                return row[0] if row else 'Dashboard'
-            except Exception as e:
-                st.error(f"Error getting last tab: {e}")
-                return 'Dashboard'
+        """Get the last visited tab for a user from user_settings table"""
+        try:
+            # First try the new user_settings table
+            result = self.execute_query(
+                "SELECT last_tab FROM user_settings WHERE username = %s",
+                (username,)
+            )
+            
+            if result:  # Found in user_settings
+                return result[0]['last_tab']
+                
+            # Fallback to old users table if not found
+            result = self.execute_query(
+                "SELECT last_tab FROM users WHERE username = %s",
+                (username,)
+            )
+            
+            if result:  # Found in users table
+                last_tab = result[0]['last_tab']
+                # Migrate to new table
+                self.update_user_last_tab(username, last_tab)
+                return last_tab
+                
+            return "Dashboard"  # Default if user not found
+            
+        except Exception as e:
+            st.error(f"Error getting last tab: {e}")
+            return "Dashboard"
 
     def update_user_last_tab(self, username, tab_name):
-        """Update the last visited tab for a user"""
+        """Update the last visited tab in user_settings table with UPSERT"""
+        try:
+            # First ensure the user exists
+            user_exists = self.execute_query(
+                "SELECT 1 FROM users WHERE username = %s",
+                (username,)
+            )
+            
+            if not user_exists:
+                return False
+                
+            # Update or insert into user_settings
+            self.execute_query(
+                """INSERT INTO user_settings (username, last_tab) 
+                VALUES (%s, %s)
+                ON CONFLICT (username) 
+                DO UPDATE SET last_tab = EXCLUDED.last_tab""",
+                (username, tab_name)
+            )
+            
+            # Also update the legacy users table for backward compatibility
+            self.execute_query(
+                "UPDATE users SET last_tab = %s WHERE username = %s",
+                (tab_name, username)
+            )
+            
+            return True
+            
+        except Exception as e:
+            st.error(f"Error updating last tab: {e}")
+            return False
+    
+    def update_user_role(self, username, new_role):
+        """Update a user's role"""
         with self.get_engine().connect() as conn:
             try:
                 conn.execute(
-                    text("UPDATE users SET last_tab = :tab_name WHERE username = :username"),
-                    {'tab_name': tab_name, 'username': username}
+                    text("UPDATE users SET role = :new_role WHERE username = :username"),
+                    {'new_role': new_role, 'username': username}
                 )
                 conn.commit()
                 return True
             except Exception as e:
                 conn.rollback()
-                st.error(f"Error updating last tab: {e}")
+                st.error(f"Error updating user role: {e}")
                 return False
+
+    def save_shift_handover(self, data):
+        """Save shift handover information"""
+        with self.get_engine().connect() as conn:
+            try:
+                conn.execute(text('''
+                INSERT INTO shift_handover (
+                    shift, handover_from, handover_to, timestamp, 
+                    notes, issues, actions
+                ) VALUES (
+                    :shift, :handover_from, :handover_to, :timestamp,
+                    :notes, :issues, :actions
+                )
+                '''), data)
+                conn.commit()
+                return True
+            except Exception as e:
+                conn.rollback()
+                st.error(f"Error saving shift handover: {e}")
+                return False
+
+    def get_shift_handovers(self, limit=5):
+        """Get recent shift handovers"""
+        with self.get_engine().connect() as conn:
+            try:
+                result = conn.execute(text("""
+                SELECT * FROM shift_handover
+                ORDER BY timestamp DESC
+                LIMIT :limit
+                """), {'limit': limit})
+                return pd.DataFrame(result.fetchall(), columns=result.keys())
+            except Exception as e:
+                st.error(f"Error retrieving shift handovers: {e}")
+                return pd.DataFrame()
+
+    def save_lab_inventory(self, data):
+        """Save lab inventory information"""
+        with self.get_engine().connect() as conn:
+            try:
+                conn.execute(text('''
+                INSERT INTO lab_inventory (
+                    item_name, quantity, unit, location,
+                    last_checked, checked_by, notes
+                ) VALUES (
+                    :item_name, :quantity, :unit, :location,
+                    :last_checked, :checked_by, :notes
+                )
+                '''), data)
+                conn.commit()
+                return True
+            except Exception as e:
+                conn.rollback()
+                st.error(f"Error saving lab inventory: {e}")
+                return False
+
+    def get_lab_inventory(self):
+        """Get all lab inventory items"""
+        with self.get_engine().connect() as conn:
+            try:
+                result = conn.execute(text("""
+                SELECT * FROM lab_inventory
+                ORDER BY item_name
+                """))
+                return pd.DataFrame(result.fetchall(), columns=result.keys())
+            except Exception as e:
+                st.error(f"Error retrieving lab inventory: {e}")
+                return pd.DataFrame()
+            
+    def execute_query(self, query, params=None):
+        """Execute a SQL query and return results as DataFrame"""
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(query, params or ())
+                if cursor.description:  # If it's a SELECT query
+                    columns = [col[0] for col in cursor.description]
+                    data = cursor.fetchall()
+                    return pd.DataFrame(data, columns=columns)
+                return pd.DataFrame()
+        except Exception as e:
+            st.error(f"Database query failed: {str(e)}")
+            return pd.DataFrame()
 
 # Singleton instance for the application
 _global_db_instance = None
@@ -611,6 +1036,16 @@ def get_recent_checks(limit=10):
     db = BeverageQADatabase()
     return db.get_recent_checks(limit)
 
+def get_user_checks(username, limit=10):
+    """Get checks for a specific user"""
+    db = BeverageQADatabase()
+    return db.get_user_checks(username, limit)
+
+def get_public_checks(limit=5):
+    """Get public checks (limited information)"""
+    db = BeverageQADatabase()
+    return db.get_public_checks(limit)
+
 # Make sure these are available for import
 __all__ = [
     'BeverageQADatabase',
@@ -621,8 +1056,15 @@ __all__ = [
     'save_quality_check_data',
     'get_all_users_data',
     'get_recent_checks',
+    'get_user_checks',
+    'get_public_checks',
     'get_db',
     'get_conn',
     'get_user_last_tab',
-    'update_user_last_tab'
+    'update_user_last_tab',
+    'update_user_role',
+    'save_shift_handover',
+    'get_shift_handovers',
+    'save_lab_inventory',
+    'get_lab_inventory'
 ]

@@ -83,7 +83,7 @@ def display_torque_tamper_form(username, start_time, check_id):
                     st.error("Failed to save check data. Please try again.")
 
 def display_net_content_form(username, start_time, check_id):
-    """Display and process the NET CONTENT form"""
+    """Display and process the NET CONTENT form with enhanced volume selection"""
     st.subheader("NET CONTENT Check")
     st.write(f"Check ID: {check_id}")
     st.write(f"Start Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -99,6 +99,7 @@ def display_net_content_form(username, start_time, check_id):
         
         custom_timestamp = dt.datetime.combine(entry_date, entry_time)
         st.caption("Leave at current date/time for real-time entries or adjust for historical data")
+        
         col1, col2 = st.columns(2)
         
         with col1:
@@ -109,7 +110,39 @@ def display_net_content_form(username, start_time, check_id):
         
         with col2:
             tare = st.number_input("Tare", min_value=0.0, step=0.1)
-            nominal_volume = st.number_input("Nominal Volume", min_value=0.0, step=0.1)
+            
+            # Enhanced Nominal Volume Selection
+            st.write("Nominal Volume (ml)")
+            VOLUME_OPTIONS = [330, 500, 1000, 2000, 5000]
+            
+            # Initialize selected volume if not exists
+            if 'nominal_volume' not in st.session_state:
+                st.session_state.nominal_volume = VOLUME_OPTIONS[1]  # Default to 500ml
+            
+            # Create columns for volume control
+            vol_col1, vol_col2, vol_col3 = st.columns([1, 3, 1])
+            
+            with vol_col1:
+                if st.button("◄", key="vol_dec"):
+                    current_idx = VOLUME_OPTIONS.index(st.session_state.nominal_volume)
+                    new_idx = max(0, current_idx - 1)
+                    st.session_state.nominal_volume = VOLUME_OPTIONS[new_idx]
+            
+            with vol_col2:
+                selected_volume = st.selectbox(
+                    "",
+                    options=VOLUME_OPTIONS,
+                    index=VOLUME_OPTIONS.index(st.session_state.nominal_volume),
+                    key="vol_select",
+                    label_visibility="collapsed"
+                )
+                st.session_state.nominal_volume = selected_volume
+            
+            with vol_col3:
+                if st.button("►", key="vol_inc"):
+                    current_idx = VOLUME_OPTIONS.index(st.session_state.nominal_volume)
+                    new_idx = min(len(VOLUME_OPTIONS)-1, current_idx + 1)
+                    st.session_state.nominal_volume = VOLUME_OPTIONS[new_idx]
         
         st.write("#### Bottle Weights")
         
@@ -148,20 +181,20 @@ def display_net_content_form(username, start_time, check_id):
         
         if submit_button:
             # Validate form
-            if not all([brix, density, tare, nominal_volume] + bottle_weights):
+            if not all([brix, density, tare] + bottle_weights):
                 st.error("Please enter all required values.")
             else:
                 # Prepare data for saving
                 data = {
                     'check_id': check_id,
                     'username': username,
-                    'timestamp': custom_timestamp,  # Use custom timestamp for historical data entry
+                    'timestamp': custom_timestamp,
                     'start_time': start_time,
                     'brix': brix,
                     'titration_acid': titration_acid if titration_acid > 0 else None,
                     'density': density,
                     'tare': tare,
-                    'nominal_volume': nominal_volume,
+                    'nominal_volume': st.session_state.nominal_volume,  # Using the selected volume
                     'bottle1_weight': bottle1_weight,
                     'bottle2_weight': bottle2_weight,
                     'bottle3_weight': bottle3_weight,

@@ -263,13 +263,14 @@ def display_capability_analysis(data, parameter, lsl=None, usl=None):
     with st.expander("View Data Summary"):
         st.dataframe(data[[parameter]].describe())
 
-def display_capability_page(data, product_filter=None):
+def display_capability_page(data, product_filter=None, edit_mode=False):
     """
     Display capability analysis page with parameter selection
     
     Args:
         data: DataFrame with all quality data
         product_filter: Optional product filter
+        edit_mode: Boolean indicating if edit controls should be shown
     """
     st.title("Process Capability Analysis")
     
@@ -299,15 +300,25 @@ def display_capability_page(data, product_filter=None):
     
     col1, col2 = st.columns(2)
     
+    # Initialize session state for specs if not exists
+    if 'spec_limits' not in st.session_state:
+        st.session_state.spec_limits = {}
+    
+    # Get current values or initialize
+    current_lsl = st.session_state.spec_limits.get(parameter, {}).get('lsl')
+    current_usl = st.session_state.spec_limits.get(parameter, {}).get('usl')
+    
     with col1:
         lsl = st.number_input("Lower Specification Limit (LSL)", 
-                           value=None, step=0.1, key="lsl_input")
+                           value=current_lsl, step=0.1, key=f"lsl_{parameter}",
+                           disabled=not edit_mode)
         if lsl == 0.0:  # Streamlit doesn't support true None for number_input
             lsl = None
     
     with col2:
         usl = st.number_input("Upper Specification Limit (USL)", 
-                           value=None, step=0.1, key="usl_input")
+                           value=current_usl, step=0.1, key=f"usl_{parameter}",
+                           disabled=not edit_mode)
         if usl == 0.0:  # Streamlit doesn't support true None for number_input
             usl = None
     
@@ -329,6 +340,15 @@ def display_capability_page(data, product_filter=None):
         if usl is None:
             usl = default_specs["usl"]
             st.info(f"Using default USL of {usl} for {parameter}")
+    
+    # Save button for edit mode
+    if edit_mode and (lsl != current_lsl or usl != current_usl):
+        if st.button("Save Specification Limits"):
+            if parameter not in st.session_state.spec_limits:
+                st.session_state.spec_limits[parameter] = {}
+            st.session_state.spec_limits[parameter]['lsl'] = lsl
+            st.session_state.spec_limits[parameter]['usl'] = usl
+            st.success("Specification limits saved!")
     
     # Warn if no specification limits are set
     if lsl is None and usl is None:

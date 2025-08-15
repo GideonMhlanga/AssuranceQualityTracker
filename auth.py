@@ -4,6 +4,7 @@ import datetime as dt
 import time
 from database import BeverageQADatabase
 from sqlalchemy import text
+import re
 
 # Initialize database connection
 db = BeverageQADatabase()
@@ -208,23 +209,123 @@ def require_role(*required_roles):
     return decorator
 
 def show_login_form():
-    """
-    Display a login form and handle authentication.
+    """Display login form with registration option and emergency admin creation"""
+    # Temporary admin creation (remove after first admin exists)
+    try:
+        # Check if any admin exists using get_all_users_data()
+        users_df = st.session_state.db.get_all_users_data()
+        admin_exists = not users_df.empty and 'admin' in users_df['role'].values
+    except Exception as e:
+        st.error(f"Error checking admin status: {str(e)}")
+        admin_exists = False
+
+    if not admin_exists:  # If no admin exists
+        with st.expander("⚠️ INITIAL ADMIN SETUP", expanded=True):
+            st.warning("No admin account detected. Create your first admin account:")
+            
+            admin_username = st.text_input("Admin Username", key="admin_username")
+            admin_password = st.text_input("Admin Password", type="password", key="admin_password")
+            confirm_password = st.text_input("Confirm Password", type="password", key="admin_confirm")
+            
+            if st.button("Create Admin Account"):
+                # Validation
+                if not re.match(r'^[a-zA-Z0-9_]{3,20}$', admin_username):
+                    st.error("Username must be 3-20 characters (letters, numbers, underscores)")
+                    return False
+                
+                if admin_password != confirm_password:
+                    st.error("Passwords don't match!")
+                    return False
+                
+                if len(admin_password) < 12:
+                    st.error("Admin password must be at least 12 characters")
+                    return False
+                
+                hashed = hash_password(admin_password)
+                try:
+                    # Use create_user function instead of direct database access
+                    success, message = create_user(
+                        username=admin_username,
+                        password=admin_password,
+                        role='admin'
+                    )
+                    if success:
+                        st.success("Admin account created successfully! Please login")
+                        st.rerun()  # Refresh to show normal login
+                    else:
+                        st.error(f"Failed to create admin account: {message}")
+                except Exception as e:
+                    st.error(f"Error creating admin: {str(e)}")
+                return False
+
+    # Regular login/register tabs
+    tab1, tab2 = st.tabs(["Login", "Register"])
     
-    Returns:
-        bool: True if login successful, False otherwise
-    """
-    with st.form("login_form"):
-        st.subheader("Login")
-        username = st.text_input("Username", key="login_username")
-        password = st.text_input("Password", type="password", key="login_password")
-        submit = st.form_submit_button("Login")
-        
-        if submit:
-            if authenticate_user(username, password):
-                st.success("Login successful!")
-                st.rerun()
-                return True
+    with tab1:
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            
+            if st.form_submit_button("Login"):
+                return authenticate_user(username, password)
+    
+    with tab2:
+        with st.form("register_form"):
+            st.subheader("New User Registration")
+            new_username = st.text_input("New Username", help="Must be 3-20 characters, letters and numbers only")
+            new_password = st.text_input("New Password", type="password", 
+                                       help="Minimum 8 characters with at least 1 number")
+            confirm_password = st.text_input("Confirm Password", type="password")
+            
+            # Get current user role if logged in (for admin registration)
+            current_role = st.session_state.get('role', 'guest')
+            
+            # Role selection with permissions
+            if current_role == 'admin':
+                role_options = ["admin", "supervisor", "operator", "viewer"]
+                default_role = "operator"
+            else:  # For guests or non-admin users
+                role_options = ["operator", "viewer"]
+                default_role = "operator"
+            
+            role = st.selectbox("Account Type", role_options, 
+                               index=role_options.index(default_role),
+                               help="Select your role in the system")
+            
+            if st.form_submit_button("Register"):
+                # Validation
+                if not re.match(r'^[a-zA-Z0-9_]{3,20}$', new_username):
+                    st.error("Username must be 3-20 characters (letters, numbers, underscores)")
+                    return False
+                
+                if new_password != confirm_password:
+                    st.error("Passwords don't match!")
+                    return False
+                
+                if len(new_password) < 8 or not any(c.isdigit() for c in new_password):
+                    st.error("Password must be at least 8 characters with 1 number")
+                    return False
+                
+                # Additional security check for non-admin users
+                if current_role != 'admin' and role in ['admin', 'supervisor']:
+                    st.error("You cannot register with this role")
+                    return False
+                
+                try:
+                    success, message = create_user(new_username, new_password, role)
+                    if success:
+                        st.success(message)
+                        # Auto-login unless admin creating another account
+                        if current_role != 'admin':
+                            return authenticate_user(new_username, new_password)
+                        return False
+                    else:
+                        st.error(message)
+                        return False
+                except Exception as e:
+                    st.error(f"Registration failed: {str(e)}")
+                    return False
+    
     return False
 
 def show_create_account_form(allowed_roles=None):

@@ -746,9 +746,12 @@ def get_html_download_link(html_content, filename="compliance_report.html"):
     
     return href
 
-def display_compliance_report_page():
+def display_compliance_report_page(edit_mode=False):
     """
     Display the compliance report generation page
+
+    Args:
+        edit_mode (bool): Whether edit controls should be enabled (not currently used in this function)
     """
     st.title("Compliance Report Generator")
     

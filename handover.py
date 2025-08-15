@@ -449,7 +449,7 @@ def get_html_download_link(html_content, filename="handover_report.html"):
     '''
 
 # Display handover creation form
-def display_handover_creation_form():
+def display_handover_creation_form(edit_mode=False):
     """Display the form for creating a shift handover report"""
     st.subheader("Create Shift Handover Report")
     
@@ -565,7 +565,7 @@ def display_handover_creation_form():
                     st.rerun()
                     
 # Display handover review page
-def display_handover_review_page():
+def display_handover_review_page(edit_mode=False):
     """Display the page for reviewing and acknowledging handover reports"""
     st.subheader("Review Handover Reports")
     
@@ -656,7 +656,7 @@ def display_handover_review_page():
                             st.components.v1.html(html_report, height=600, scrolling=True)
 
 # Display shift configuration page
-def display_shift_config_page():
+def display_shift_config_page(edit_mode=False):
     """Display the page for configuring shifts"""
     st.subheader("Shift Configuration")
     
@@ -734,8 +734,12 @@ def display_shift_config_page():
                         conn.close()
 
 # Main function to display shift handover page
-def display_shift_handover_page():
-    """Display the shift handover page with tabs"""
+def display_shift_handover_page(edit_mode=False):
+    """Display the shift handover page with tabs
+    
+    Args:
+        edit_mode: Boolean indicating if edit controls should be shown
+    """
     initialize_handover()
     st.title("Shift Handover Management")
     st.markdown("""
@@ -745,8 +749,8 @@ def display_shift_handover_page():
     
     tab1, tab2, tab3 = st.tabs(["Create Handover", "Review Handovers", "Shift Configuration"])
     with tab1:
-        display_handover_creation_form()
+        display_handover_creation_form(edit_mode=edit_mode)
     with tab2:
-        display_handover_review_page()
+        display_handover_review_page(edit_mode=edit_mode)
     with tab3:
-        display_shift_config_page()
+        display_shift_config_page(edit_mode=edit_mode)

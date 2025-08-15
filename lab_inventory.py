@@ -713,79 +713,80 @@ def check_restock_status():
 # Inventory Management
 # ======================
 
-def manage_chemicals():
+def manage_chemicals(edit_mode=False, comment_mode=False):
     """Chemical inventory management"""
     df = st.session_state.lab_inventory["chemicals"].copy()
     
-    with st.expander("➕ Add New Chemical", expanded=False):
-        with st.form("add_chemical_form"):
-            cols = st.columns([1, 2, 1])
-            with cols[0]:
-                new_id = generate_unique_id("chemicals")
-                st.text_input("ID", value=new_id, disabled=True)
-                item_name = st.text_input("Item Name", key="new_chem_name")
-                category = st.selectbox("Category", INVENTORY_CATEGORIES["chemicals"])
-            with cols[1]:
-                minimum_stock = st.number_input("Minimum Stock", min_value=0.0, step=0.1, format="%.2f")
-                current_stock = st.number_input("Current Stock", min_value=0.0, step=0.1, format="%.2f")
-                monthly_usage = st.number_input("Monthly Usage", min_value=0.0, step=0.1, format="%.2f")
-                unit = st.selectbox("Unit", ["g", "kg", "mL", "L", "tablets", "bottles", "sachets", "units"])
-            with cols[2]:
-                expiry_date = st.date_input(
-                    "Expiry Date",
-                    min_value=date(2000, 1, 1),
-                    format="YYYY-MM-DD"
-                ).strftime("%Y-%m-%d")  # Convert to string format
-                location = st.text_input("Storage Location")
-                supplier = st.text_input("Supplier")
-                comment = st.text_input("Comments")
-            
-            if st.form_submit_button("Add Chemical"):
-                # Remove date validation since we're using date_input
-                existing_items = df['item'].str.lower().tolist()
-                if item_name.lower() in existing_items:
-                    st.error(f"A chemical with the name '{item_name}' already exists in Inventory!")
-                else:
-                    new_item = {
-                        "id": new_id,
-                        "item": item_name,
-                        "category": category,
-                        "minimum": minimum_stock,
-                        "current": current_stock,
-                        "monthly": monthly_usage,
-                        "unit": unit,
-                        "expiry": expiry_date,
-                        "location": location,
-                        "supplier": supplier,
-                        "comment": comment,
-                        "status": "OK"
-                    }
-                    
-                    # Calculate months of stock
-                    if monthly_usage > 0:
-                        new_item["Months Stock"] = round(current_stock / monthly_usage, 2)
-                    
-                    # Double-check ID doesn't exist
-                    conn = get_conn()
-                    if conn:
-                        existing_id = conn.execute(
-                            text("SELECT id FROM chemicals WHERE id = :id"),
-                            {"id": new_id}
-                        ).fetchone()
+    if edit_mode:
+        with st.expander("➕ Add New Chemical", expanded=False):
+            with st.form("add_chemical_form"):
+                cols = st.columns([1, 2, 1])
+                with cols[0]:
+                    new_id = generate_unique_id("chemicals")
+                    st.text_input("ID", value=new_id, disabled=True)
+                    item_name = st.text_input("Item Name", key="new_chem_name")
+                    category = st.selectbox("Category", INVENTORY_CATEGORIES["chemicals"])
+                with cols[1]:
+                    minimum_stock = st.number_input("Minimum Stock", min_value=0.0, step=0.1, format="%.2f")
+                    current_stock = st.number_input("Current Stock", min_value=0.0, step=0.1, format="%.2f")
+                    monthly_usage = st.number_input("Monthly Usage", min_value=0.0, step=0.1, format="%.2f")
+                    unit = st.selectbox("Unit", ["g", "kg", "mL", "L", "tablets", "bottles", "sachets", "units"])
+                with cols[2]:
+                    expiry_date = st.date_input(
+                        "Expiry Date",
+                        min_value=date(2000, 1, 1),
+                        format="YYYY-MM-DD"
+                    ).strftime("%Y-%m-%d")  # Convert to string format
+                    location = st.text_input("Storage Location")
+                    supplier = st.text_input("Supplier")
+                    comment = st.text_input("Comments")
+                
+                if st.form_submit_button("Add Chemical"):
+                    # Remove date validation since we're using date_input
+                    existing_items = df['item'].str.lower().tolist()
+                    if item_name.lower() in existing_items:
+                        st.error(f"A chemical with the name '{item_name}' already exists in Inventory!")
+                    else:
+                        new_item = {
+                            "id": new_id,
+                            "item": item_name,
+                            "category": category,
+                            "minimum": minimum_stock,
+                            "current": current_stock,
+                            "monthly": monthly_usage,
+                            "unit": unit,
+                            "expiry": expiry_date,
+                            "location": location,
+                            "supplier": supplier,
+                            "comment": comment,
+                            "status": "OK"
+                        }
                         
-                        if existing_id:
-                            st.error(f"ID {new_id} already exists! Generating new ID...")
-                            new_id = generate_unique_id("chemicals")
-                            new_item["id"] = new_id
-                    
-                    result = insert_item("chemicals", new_item)
-                    if result:
-                        st.session_state.lab_inventory["chemicals"] = pd.read_sql(
-                            text("SELECT * FROM chemicals"), 
-                            get_conn()
-                        )
-                        st.success(f"Added {item_name} to inventory")
-                        st.rerun()
+                        # Calculate months of stock
+                        if monthly_usage > 0:
+                            new_item["Months Stock"] = round(current_stock / monthly_usage, 2)
+                        
+                        # Double-check ID doesn't exist
+                        conn = get_conn()
+                        if conn:
+                            existing_id = conn.execute(
+                                text("SELECT id FROM chemicals WHERE id = :id"),
+                                {"id": new_id}
+                            ).fetchone()
+                            
+                            if existing_id:
+                                st.error(f"ID {new_id} already exists! Generating new ID...")
+                                new_id = generate_unique_id("chemicals")
+                                new_item["id"] = new_id
+                        
+                        result = insert_item("chemicals", new_item)
+                        if result:
+                            st.session_state.lab_inventory["chemicals"] = pd.read_sql(
+                                text("SELECT * FROM chemicals"), 
+                                get_conn()
+                            )
+                            st.success(f"Added {item_name} to inventory")
+                            st.rerun()
     
     st.subheader("Current Chemical Inventory")
 
@@ -808,108 +809,116 @@ def manage_chemicals():
         column_order=['id', 'item', 'category', 'current', 'minimum', 'monthly', 'Months Stock', 'status', 'expiry']
     )
     
-    edited_df = st.data_editor(
-        df,
-        num_rows="dynamic",
-        use_container_width=True,
-        disabled=["id", "Months Stock"],
-        column_config={
-            "minimum": st.column_config.NumberColumn(format="%.2f"),
-            "current": st.column_config.NumberColumn(format="%.2f"),
-            "monthly": st.column_config.NumberColumn(format="%.2f"),
-            "Months Stock": st.column_config.NumberColumn(format="%.2f"),
-            "expiry": st.column_config.DateColumn(
-            "Expiry Date",
-            format="YYYY-MM-DD",
-            min_value=date(2000, 1, 1),
-            help="Select expiry date from calendar"
-        ),
-            "status": st.column_config.SelectboxColumn(
-                "Status",
-                options=["OK", "Low", "Critical", "Out of Stock", "Expired"],
-                required=True
-            )
-        }
-    )
-    
-    if st.button("Save Chemical Changes"):
-        # Validate dates
-        if 'expiry' in edited_df.columns:
-            edited_df['expiry'] = pd.to_datetime(
-                edited_df['expiry'], 
-                format='%Y-%m-%d', 
-                errors='coerce'
-            )
-            invalid_dates = edited_df[edited_df['expiry'].isna()]
-            if not invalid_dates.empty:
-                st.error("Some expiry dates are invalid. Please use YYYY-MM-DD format.")
-                st.stop()
-        
-        # Recalculate months of stock
-        if 'monthly' in edited_df.columns and 'current' in edited_df.columns:
-            edited_df['Months Stock'] = edited_df.apply(
-                lambda row: round(calculate_months_of_stock(row), 2), 
-                axis=1
-            )
-        
-        
-        save_to_db("chemicals", edited_df)
-        st.session_state.lab_inventory["chemicals"] = pd.read_sql(
-            text("SELECT * FROM chemicals"), 
-            get_conn()
+    # Data Editor (only in edit mode)
+    if edit_mode:
+        edited_df = st.data_editor(
+            df,
+            num_rows="dynamic",
+            use_container_width=True,
+            disabled=["id", "Months Stock"],
+            column_config={
+                "minimum": st.column_config.NumberColumn(format="%.2f"),
+                "current": st.column_config.NumberColumn(format="%.2f"),
+                "monthly": st.column_config.NumberColumn(format="%.2f"),
+                "Months Stock": st.column_config.NumberColumn(format="%.2f"),
+                "expiry": st.column_config.DateColumn(
+                "Expiry Date",
+                format="YYYY-MM-DD",
+                min_value=date(2000, 1, 1),
+                help="Select expiry date from calendar"
+            ),
+                "status": st.column_config.SelectboxColumn(
+                    "Status",
+                    options=["OK", "Low", "Critical", "Out of Stock", "Expired"],
+                    required=True
+                ),
+                "comment": st.column_config.TextColumn(
+                    "Comments",
+                    disabled=not comment_mode
+                )
+            }
         )
-        st.success("Changes saved successfully!")
-        st.rerun()
+        
+        if st.button("Save Chemical Changes"):
+            # Validate dates
+            if 'expiry' in edited_df.columns:
+                edited_df['expiry'] = pd.to_datetime(
+                    edited_df['expiry'], 
+                    format='%Y-%m-%d', 
+                    errors='coerce'
+                )
+                invalid_dates = edited_df[edited_df['expiry'].isna()]
+                if not invalid_dates.empty:
+                    st.error("Some expiry dates are invalid. Please use YYYY-MM-DD format.")
+                    st.stop()
+            
+            # Recalculate months of stock
+            if 'monthly' in edited_df.columns and 'current' in edited_df.columns:
+                edited_df['Months Stock'] = edited_df.apply(
+                    lambda row: round(calculate_months_of_stock(row), 2), 
+                    axis=1
+                )
+            
+            
+            save_to_db("chemicals", edited_df)
+            st.session_state.lab_inventory["chemicals"] = pd.read_sql(
+                text("SELECT * FROM chemicals"), 
+                get_conn()
+            )
+            st.success("Changes saved successfully!")
+            st.rerun()
 
-def manage_glassware():
+def manage_glassware(edit_mode=False, comment_mode=False):
     """Glassware inventory management with broken items tracking"""
     df = st.session_state.lab_inventory["glassware"].copy()
     
-    with st.expander("➕ Add New Glassware", expanded=False):
-        with st.form("add_glassware_form"):
-            cols = st.columns([1, 2, 1])
-            with cols[0]:
-                new_id = generate_unique_id("glassware")
-                st.text_input("ID", value=new_id, disabled=True)
-                item_name = st.text_input("Item Name", key="new_glass_name")
-                category = st.selectbox("Category", INVENTORY_CATEGORIES["glassware"])
-            with cols[1]:
-                total_quantity = st.number_input("Total Quantity", min_value=0, step=1, value=1)
-                broken_quantity = st.number_input("Broken Quantity", min_value=0, step=1, value=0)
-                usable_quantity = total_quantity - broken_quantity
-                st.text_input("Usable Quantity", value=usable_quantity, disabled=True)
-                unit = st.selectbox("Unit", ["pieces", "sets", "units"])
-            with cols[2]:
-                location = st.text_input("Storage Location")
-                status = st.selectbox("Status", GLASSWARE_STATUS_OPTIONS)
-                comment = st.text_input("Comments")
-            
-            if st.form_submit_button("Add Glassware"):
-                existing_items = df['item'].str.lower().tolist()
-                if item_name.lower() in existing_items:
-                    st.error(f"Glassware with the name '{item_name}' already exists in Inventory")
-                else:
-                    new_item = {
-                        "id": new_id,
-                        "item": item_name,
-                        "category": category,
-                        "total_quantity": total_quantity,
-                        "broken_quantity": broken_quantity,
-                        # Remove "current": usable_quantity since it's generated by the database
-                        "unit": unit,
-                        "location": location,
-                        "status": status if broken_quantity > 0 else "OK",
-                        "comment": comment
-                    }
-                    
-                    result = insert_item("glassware", new_item)
-                    if result:
-                        st.session_state.lab_inventory["glassware"] = pd.read_sql(
-                            text("SELECT * FROM glassware"), 
-                            get_conn()
-                        )
-                        st.success(f"Added {item_name} to inventory")
-                        st.rerun()
+    # Add New Glassware Form (only in edit mode)
+    if edit_mode:
+        with st.expander("➕ Add New Glassware", expanded=False):
+            with st.form("add_glassware_form"):
+                cols = st.columns([1, 2, 1])
+                with cols[0]:
+                    new_id = generate_unique_id("glassware")
+                    st.text_input("ID", value=new_id, disabled=True)
+                    item_name = st.text_input("Item Name", key="new_glass_name")
+                    category = st.selectbox("Category", INVENTORY_CATEGORIES["glassware"])
+                with cols[1]:
+                    total_quantity = st.number_input("Total Quantity", min_value=0, step=1, value=1)
+                    broken_quantity = st.number_input("Broken Quantity", min_value=0, step=1, value=0)
+                    usable_quantity = total_quantity - broken_quantity
+                    st.text_input("Usable Quantity", value=usable_quantity, disabled=True)
+                    unit = st.selectbox("Unit", ["pieces", "sets", "units"])
+                with cols[2]:
+                    location = st.text_input("Storage Location")
+                    status = st.selectbox("Status", GLASSWARE_STATUS_OPTIONS)
+                    comment = st.text_input("Comments")
+                
+                if st.form_submit_button("Add Glassware"):
+                    existing_items = df['item'].str.lower().tolist()
+                    if item_name.lower() in existing_items:
+                        st.error(f"Glassware with the name '{item_name}' already exists in Inventory")
+                    else:
+                        new_item = {
+                            "id": new_id,
+                            "item": item_name,
+                            "category": category,
+                            "total_quantity": total_quantity,
+                            "broken_quantity": broken_quantity,
+                            # Remove "current": usable_quantity since it's generated by the database
+                            "unit": unit,
+                            "location": location,
+                            "status": status if broken_quantity > 0 else "OK",
+                            "comment": comment
+                        }
+                        
+                        result = insert_item("glassware", new_item)
+                        if result:
+                            st.session_state.lab_inventory["glassware"] = pd.read_sql(
+                                text("SELECT * FROM glassware"), 
+                                get_conn()
+                            )
+                            st.success(f"Added {item_name} to inventory")
+                            st.rerun()
     
     st.subheader("Current Glassware Inventory")
     
@@ -962,65 +971,67 @@ def manage_glassware():
     )
     
     # Enhanced data editor with broken quantity tracking
-    edited_df = st.data_editor(
-        filtered_df,
-        num_rows="dynamic",
-        use_container_width=True,
-        disabled=["id", "current"],
-        column_config={
-            "status": st.column_config.SelectboxColumn(
-                "Status",
-                options=GLASSWARE_STATUS_OPTIONS,
-                required=True
-            ),
-            "total_quantity": st.column_config.NumberColumn(
-                "Total Qty",
-                min_value=0,
-                step=1
-            ),
-            "broken_quantity": st.column_config.NumberColumn(
-                "Broken Qty",
-                min_value=0,
-                step=1
-            ),
-            "current": st.column_config.NumberColumn(
-                "Usable Qty",
-                help="Automatically calculated as Total - Broken"
-            )
-        }
-    )
-    
-    # Update status based on broken quantity (but don't update current in the DataFrame)
-    if "broken_quantity" in edited_df.columns:
-        edited_df["status"] = np.where(
-            edited_df["broken_quantity"] > 0,
-            "Broken",
-            "OK"
+    # Data Editor (only in edit mode)
+    if edit_mode:
+        edited_df = st.data_editor(
+            filtered_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            disabled=["id", "current"],
+            column_config={
+                "status": st.column_config.SelectboxColumn(
+                    "Status",
+                    options=GLASSWARE_STATUS_OPTIONS,
+                    required=True
+                ),
+                "total_quantity": st.column_config.NumberColumn(
+                    "Total Qty",
+                    min_value=0,
+                    step=1
+                ),
+                "broken_quantity": st.column_config.NumberColumn(
+                    "Broken Qty",
+                    min_value=0,
+                    step=1
+                ),
+                "current": st.column_config.NumberColumn(
+                    "Usable Qty",
+                    help="Automatically calculated as Total - Broken"
+                )
+            }
         )
-    
-    # Update status based on broken quantity (but don't update current in the DataFrame)
-    if "broken_quantity" in edited_df.columns:
-        # Only update status if it's not already set to a specific condition
-        edited_df["status"] = np.where(
-            (edited_df["broken_quantity"] > 0) & (edited_df["status"] == "OK"),
-            "Broken",
-            edited_df["status"]
-        )
-
-    if st.button("Save Glassware Changes"):
-        # Remove the 'current' column before saving since it's generated by the database
-        if 'current' in edited_df.columns:
-            edited_df = edited_df.drop(columns=['current'])
         
-        save_to_db("glassware", edited_df)
-        st.session_state.lab_inventory["glassware"] = pd.read_sql(
-            text("SELECT * FROM glassware"), 
-            get_conn()
-        )
-        st.success("Changes saved successfully!")
-        st.rerun()
+        # Update status based on broken quantity (but don't update current in the DataFrame)
+        if "broken_quantity" in edited_df.columns:
+            edited_df["status"] = np.where(
+                edited_df["broken_quantity"] > 0,
+                "Broken",
+                "OK"
+            )
+        
+        # Update status based on broken quantity (but don't update current in the DataFrame)
+        if "broken_quantity" in edited_df.columns:
+            # Only update status if it's not already set to a specific condition
+            edited_df["status"] = np.where(
+                (edited_df["broken_quantity"] > 0) & (edited_df["status"] == "OK"),
+                "Broken",
+                edited_df["status"]
+            )
 
-def manage_equipment():
+        if st.button("Save Glassware Changes"):
+            # Remove the 'current' column before saving since it's generated by the database
+            if 'current' in edited_df.columns:
+                edited_df = edited_df.drop(columns=['current'])
+            
+            save_to_db("glassware", edited_df)
+            st.session_state.lab_inventory["glassware"] = pd.read_sql(
+                text("SELECT * FROM glassware"), 
+                get_conn()
+            )
+            st.success("Changes saved successfully!")
+            st.rerun()
+
+def manage_equipment(edit_mode=False, comment_mode=False):
     """Equipment inventory management with non-working items tracking"""
     df = st.session_state.lab_inventory["equipment"].copy()
     
@@ -1032,70 +1043,71 @@ def manage_equipment():
             errors='coerce'
         )
     
-    with st.expander("➕ Add New Equipment", expanded=False):
-        with st.form("add_equipment_form"):
-            cols = st.columns([1, 2, 1])
-            with cols[0]:
-                new_id = generate_unique_id("equipment")
-                st.text_input("ID", value=new_id, disabled=True)
-                item_name = st.text_input("Item Name", key="new_equip_name")
-                category = st.selectbox("Category", INVENTORY_CATEGORIES["equipment"])
-            with cols[1]:
-                total_quantity = st.number_input("Total Quantity", min_value=1, step=1, value=1)
-                non_working_quantity = st.number_input("Non-Working Quantity", min_value=0, step=1, value=0, 
-                                                     max_value=total_quantity)
-                working_quantity = total_quantity - non_working_quantity
-                st.text_input("Working Quantity", value=working_quantity, disabled=True)
-                unit = st.selectbox("Unit", ["units", "sets"])
-            with cols[2]:
-                location = st.text_input("Storage Location")
-                status = st.selectbox("Status", ["Working", "Needs service", "In repair", "Broken", "Out for calibration"])
-                last_calibration = st.date_input(
-                    "Last Calibration Date",
-                    value=datetime.now().date() - timedelta(days=30),
-                    format="YYYY-MM-DD"
-                )
-                comment = st.text_input("Comments")
-            
-            if st.form_submit_button("Add Equipment"):
-                existing_items = df['item'].str.lower().tolist()
-                if item_name.lower() in existing_items:
-                    st.error(f"An equipment item with the name '{item_name}' already exists in Inventory!")
-                else:
-                    new_item = {
-                        "id": new_id,
-                        "item": item_name,
-                        "category": category,
-                        "total_quantity": total_quantity,
-                        "non_working_quantity": non_working_quantity,
-                        "unit": unit,
-                        "location": location,
-                        "status": status,
-                        "last_calibration": last_calibration.strftime('%Y-%m-%d'),
-                        "comment": comment
-                    }
-                    
-                    # Double-check ID doesn't exist
-                    conn = get_conn()
-                    if conn:
-                        existing_id = conn.execute(
-                            text("SELECT id FROM equipment WHERE id = :id"),
-                            {"id": new_id}
-                        ).fetchone()
+    if edit_mode:
+        with st.expander("➕ Add New Equipment", expanded=False):
+            with st.form("add_equipment_form"):
+                cols = st.columns([1, 2, 1])
+                with cols[0]:
+                    new_id = generate_unique_id("equipment")
+                    st.text_input("ID", value=new_id, disabled=True)
+                    item_name = st.text_input("Item Name", key="new_equip_name")
+                    category = st.selectbox("Category", INVENTORY_CATEGORIES["equipment"])
+                with cols[1]:
+                    total_quantity = st.number_input("Total Quantity", min_value=1, step=1, value=1)
+                    non_working_quantity = st.number_input("Non-Working Quantity", min_value=0, step=1, value=0, 
+                                                        max_value=total_quantity)
+                    working_quantity = total_quantity - non_working_quantity
+                    st.text_input("Working Quantity", value=working_quantity, disabled=True)
+                    unit = st.selectbox("Unit", ["units", "sets"])
+                with cols[2]:
+                    location = st.text_input("Storage Location")
+                    status = st.selectbox("Status", ["Working", "Needs service", "In repair", "Broken", "Out for calibration"])
+                    last_calibration = st.date_input(
+                        "Last Calibration Date",
+                        value=datetime.now().date() - timedelta(days=30),
+                        format="YYYY-MM-DD"
+                    )
+                    comment = st.text_input("Comments")
+                
+                if st.form_submit_button("Add Equipment"):
+                    existing_items = df['item'].str.lower().tolist()
+                    if item_name.lower() in existing_items:
+                        st.error(f"An equipment item with the name '{item_name}' already exists in Inventory!")
+                    else:
+                        new_item = {
+                            "id": new_id,
+                            "item": item_name,
+                            "category": category,
+                            "total_quantity": total_quantity,
+                            "non_working_quantity": non_working_quantity,
+                            "unit": unit,
+                            "location": location,
+                            "status": status,
+                            "last_calibration": last_calibration.strftime('%Y-%m-%d'),
+                            "comment": comment
+                        }
                         
-                        if existing_id:
-                            st.error(f"ID {new_id} already exists! Generating new ID...")
-                            new_id = generate_unique_id("equipment")
-                            new_item["id"] = new_id
-                    
-                    result = insert_item("equipment", new_item)
-                    if result:
-                        st.session_state.lab_inventory["equipment"] = pd.read_sql(
-                            text("SELECT * FROM equipment"), 
-                            get_conn()
-                        )
-                        st.success(f"Added {item_name} to inventory")
-                        st.rerun()
+                        # Double-check ID doesn't exist
+                        conn = get_conn()
+                        if conn:
+                            existing_id = conn.execute(
+                                text("SELECT id FROM equipment WHERE id = :id"),
+                                {"id": new_id}
+                            ).fetchone()
+                            
+                            if existing_id:
+                                st.error(f"ID {new_id} already exists! Generating new ID...")
+                                new_id = generate_unique_id("equipment")
+                                new_item["id"] = new_id
+                        
+                        result = insert_item("equipment", new_item)
+                        if result:
+                            st.session_state.lab_inventory["equipment"] = pd.read_sql(
+                                text("SELECT * FROM equipment"), 
+                                get_conn()
+                            )
+                            st.success(f"Added {item_name} to inventory")
+                            st.rerun()
     
     st.subheader("Current Equipment Inventory")
     
@@ -1128,57 +1140,59 @@ def manage_equipment():
     )
     
     # Enhanced data editor with non-working quantity tracking
-    edited_df = st.data_editor(
-        df,
-        num_rows="dynamic",
-        use_container_width=True,
-        disabled=["id"],
-        column_config={
-            "status": st.column_config.SelectboxColumn(
-                "Status",
-                options=["Working", "Needs service", "In repair", "Broken", "Out for calibration"],
-                required=True,
-                help="Current operational status of the equipment"
-            ),
-            "total_quantity": st.column_config.NumberColumn(
-                "Total Qty",
-                min_value=1,
-                step=1,
-                help="Total number of this equipment including non-working units"
-            ),
-            "non_working_quantity": st.column_config.NumberColumn(
-                "Non-Working Qty",
-                min_value=0,
-                step=1,
-                help="Number of non-functional units"
-            ),
-            "last_calibration": st.column_config.DateColumn(
-                "Last Calibration",
-                format="YYYY-MM-DD",
-                min_value=date(2000, 1, 1),
-                help="Select last calibration date from calendar"
-            )
-        }
-    )
-    
-    if st.button("Save Equipment Changes"):
-        # Convert datetime back to strings before saving
-        if 'last_calibration' in edited_df.columns:
-            edited_df['last_calibration'] = edited_df['last_calibration'].dt.strftime('%Y-%m-%d')
-        
-        save_to_db("equipment", edited_df)
-        st.session_state.lab_inventory["equipment"] = pd.read_sql(
-            text("SELECT * FROM equipment"), 
-            get_conn()
+    #Data Editor (only in edit mode)
+    if edit_mode:
+        edited_df = st.data_editor(
+            df,
+            num_rows="dynamic",
+            use_container_width=True,
+            disabled=["id"],
+            column_config={
+                "status": st.column_config.SelectboxColumn(
+                    "Status",
+                    options=["Working", "Needs service", "In repair", "Broken", "Out for calibration"],
+                    required=True,
+                    help="Current operational status of the equipment"
+                ),
+                "total_quantity": st.column_config.NumberColumn(
+                    "Total Qty",
+                    min_value=1,
+                    step=1,
+                    help="Total number of this equipment including non-working units"
+                ),
+                "non_working_quantity": st.column_config.NumberColumn(
+                    "Non-Working Qty",
+                    min_value=0,
+                    step=1,
+                    help="Number of non-functional units"
+                ),
+                "last_calibration": st.column_config.DateColumn(
+                    "Last Calibration",
+                    format="YYYY-MM-DD",
+                    min_value=date(2000, 1, 1),
+                    help="Select last calibration date from calendar"
+                )
+            }
         )
-        st.success("Changes saved successfully!")
-        st.rerun()
+        
+        if st.button("Save Equipment Changes"):
+            # Convert datetime back to strings before saving
+            if 'last_calibration' in edited_df.columns:
+                edited_df['last_calibration'] = edited_df['last_calibration'].dt.strftime('%Y-%m-%d')
+            
+            save_to_db("equipment", edited_df)
+            st.session_state.lab_inventory["equipment"] = pd.read_sql(
+                text("SELECT * FROM equipment"), 
+                get_conn()
+            )
+            st.success("Changes saved successfully!")
+            st.rerun()
 
 # ======================
 # Enhanced Visualization Functions
 # ======================
 
-def display_inventory_dashboard():
+def display_inventory_dashboard(edit_mode=False, comment_mode=False):
     """Display comprehensive inventory dashboard with visualizations and inventory tables"""
     st.title("📊 Inventory Dashboard")
     
@@ -1491,8 +1505,13 @@ def generate_comprehensive_report():
     buffer.seek(0)
     return buffer
 
-def show_reporting_section():
-    """Display the enhanced reporting interface"""
+def show_reporting_section(edit_mode=False, comment_mode=False):
+    """Display the enhanced reporting interface
+    
+    Args:
+        edit_mode (bool): Whether edit controls should be enabled
+        comment_mode (bool): Whether comment functionality should be enabled
+    """
     st.header("📑 Inventory Reporting")
     
     with st.expander("📄 Generate Comprehensive Report", expanded=True):
@@ -1562,8 +1581,13 @@ def show_reporting_section():
 # Updated Main Page
 # ======================
 
-def display_lab_inventory_page():
-    """Main inventory management interface with enhanced visualization"""
+def display_lab_inventory_page(edit_mode=False, comment_mode=False):
+    """Main inventory management interface with enhanced visualization
+
+    Args:
+        edit_mode (bool): Whether edit controls should be enabled
+        comment_mode (bool): Whether comment functionality should be enabled
+    """
     st.title("🧪 Laboratory Inventory Management System")
     
     if 'lab_inventory' not in st.session_state:
@@ -1579,19 +1603,19 @@ def display_lab_inventory_page():
     ])
     
     with tab1:
-        display_inventory_dashboard()
+        display_inventory_dashboard(edit_mode=False, comment_mode=False)
     
     with tab2:
-        manage_chemicals()
+        manage_chemicals(edit_mode=False, comment_mode=False)
     
     with tab3:
-        manage_glassware()
+        manage_glassware(edit_mode=False, comment_mode=False)
     
     with tab4:
-        manage_equipment()
+        manage_equipment(edit_mode=False, comment_mode=False)
     
     with tab5:
-        show_reporting_section()
+        show_reporting_section(edit_mode=False, comment_mode=False)
 
 if __name__ == "__main__":
     try:
