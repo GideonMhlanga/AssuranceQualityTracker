@@ -1,251 +1,225 @@
 import streamlit as st
-import pandas as pd
-import datetime as dt
-import io
+from docx import Document
+from docx.shared import Inches
+import matplotlib.pyplot as plt
+import tempfile
+import os
 import base64
-from database import BeverageQADatabase  # Updated import
-from utils import format_timestamp
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+import datetime as dt
 
-# Initialize database connection
-db = BeverageQADatabase()
 
-def generate_report(start_date, end_date):
+def generate_report(report_data, report_type, start_date, end_date, comments=None):
     """
-    Generate a report for the specified date range
+    Generate a professional Word document report with visualizations
     
     Args:
-        start_date: Start date for the report
-        end_date: End date for the report
+        report_data: DataFrame with the processed report data
+        report_type: Type of report being generated
+        start_date: Start date of report period
+        end_date: End date of report period
+        comments: Optional comments to include
         
     Returns:
-        DataFrame with report data
+        Path to the generated Word document
     """
-    # Get all check data for the period using the class method
-    all_data = db.get_check_data(start_date, end_date)
+    # Create document
+    doc = Document()
     
-    if all_data.empty:
-        return None
-        
-    # Create a summary report dataframe
-    report_data = pd.DataFrame()
+    # Add title with formatting
+    title = doc.add_heading(f'{report_type} Quality Report', level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
-    # Process data based on check type
-    if 'source' in all_data.columns:
-        # Separate data by source
-        torque_data = all_data[all_data['source'] == 'torque_tamper']
-        net_content_data = all_data[all_data['source'] == 'net_content']
-        quality_data = all_data[all_data['source'] == 'quality_check']
-        
-        # Create report sections
-        report_sections = []
-        
-        # 1. Summary statistics
-        summary = {
-            'Report Section': 'Summary',
-            'Metric': [
-                'Total Checks',
-                'Torque & Tamper Checks',
-                'Net Content Checks',
-                '30-Minute Checks',
-                'Unique Inspectors',
-                'Date Range'
-            ],
-            'Value': [
-                len(all_data),
-                len(torque_data),
-                len(net_content_data),
-                len(quality_data),
-                all_data['username'].nunique(),
-                f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
-            ]
-        }
-        summary_df = pd.DataFrame(summary)
-        report_sections.append(summary_df)
-        
-        # 2. BRIX statistics
-        if 'brix' in all_data.columns:
-            brix_data = all_data[all_data['brix'].notna()]
-            
-            if not brix_data.empty:
-                brix_stats = {
-                    'Report Section': 'BRIX Statistics',
-                    'Metric': [
-                        'Average BRIX',
-                        'Minimum BRIX',
-                        'Maximum BRIX',
-                        'Standard Deviation',
-                        'Number of Readings'
-                    ],
-                    'Value': [
-                        f"{brix_data['brix'].mean():.2f}",
-                        f"{brix_data['brix'].min():.2f}",
-                        f"{brix_data['brix'].max():.2f}",
-                        f"{brix_data['brix'].std():.2f}",
-                        len(brix_data)
-                    ]
-                }
-                brix_df = pd.DataFrame(brix_stats)
-                report_sections.append(brix_df)
-        
-        # 3. Torque statistics
-        torque_cols = ['head1_torque', 'head2_torque', 'head3_torque', 'head4_torque', 'head5_torque']
-        if not torque_data.empty and any(col in torque_data.columns for col in torque_cols):
-            metrics = []
-            values = []
-            
-            for head_col in [col for col in torque_cols if col in torque_data.columns]:
-                head_num = head_col.split('_')[0][4:]
-                avg = torque_data[head_col].mean()
-                out_of_range = ((torque_data[head_col] < 5) | (torque_data[head_col] > 12)).sum()
-                pct_in_range = 100 * (1 - out_of_range / len(torque_data))
-                
-                metrics.extend([
-                    f"Head {head_num} - Average Torque",
-                    f"Head {head_num} - Out of Range",
-                    f"Head {head_num} - % In Range"
-                ])
-                
-                values.extend([
-                    f"{avg:.2f}",
-                    out_of_range,
-                    f"{pct_in_range:.1f}%"
-                ])
-            
-            # Add overall torque statistics
-            if metrics:
-                torque_stats = {
-                    'Report Section': 'Torque Statistics',
-                    'Metric': metrics,
-                    'Value': values
-                }
-                torque_df = pd.DataFrame(torque_stats)
-                report_sections.append(torque_df)
-        
-        # 4. Tamper evidence statistics
-        if not torque_data.empty and 'tamper_evidence' in torque_data.columns:
-            pass_count = torque_data['tamper_evidence'].str.contains('PASS').sum()
-            fail_count = torque_data['tamper_evidence'].str.contains('FAIL').sum()
-            pass_pct = 100 * pass_count / (pass_count + fail_count) if (pass_count + fail_count) > 0 else 0
-            
-            tamper_stats = {
-                'Report Section': 'Tamper Evidence',
-                'Metric': [
-                    'PASS Count',
-                    'FAIL Count',
-                    'Pass Rate'
-                ],
-                'Value': [
-                    pass_count,
-                    fail_count,
-                    f"{pass_pct:.1f}%"
-                ]
-            }
-            tamper_df = pd.DataFrame(tamper_stats)
-            report_sections.append(tamper_df)
-        
-        # 5. Quality issues summary
-        if not quality_data.empty:
-            quality_params = [
-                ('label_application', 'Not OK', 'Label Issues'),
-                ('torque_test', 'FAIL', 'Torque Test Issues'),
-                ('pallet_check', 'Not OK', 'Pallet Issues'),
-                ('date_code', 'Not OK', 'Date Code Issues'),
-                ('odour', 'Bad Odour', 'Odour Issues'),
-                ('appearance', 'Not To Std', 'Appearance Issues'),
-                ('product_taste', 'Not To Std', 'Taste Issues'),
-                ('filler_height', 'Not To Std', 'Filler Height Issues'),
-                ('bottle_check', 'Not OK', 'Bottle Issues'),
-                ('bottle_seams', 'Not OK', 'Bottle Seam Issues'),
-                ('container_rinse_inspection', 'Not OK', 'Container Rinse Issues'),
-                ('container_rinse_water_odour', 'Bad Odour', 'Rinse Water Issues')
-            ]
-            
-            metrics = []
-            values = []
-            
-            for param, fail_value, label in quality_params:
-                if param in quality_data.columns:
-                    issue_count = (quality_data[param] == fail_value).sum()
-                    issue_pct = 100 * issue_count / len(quality_data)
-                    
-                    if issue_count > 0:
-                        metrics.append(label)
-                        values.append(f"{issue_count} ({issue_pct:.1f}%)")
-            
-            if metrics:
-                quality_issues = {
-                    'Report Section': 'Quality Issues',
-                    'Metric': metrics,
-                    'Value': values
-                }
-                quality_issues_df = pd.DataFrame(quality_issues)
-                report_sections.append(quality_issues_df)
-        
-        # 6. Product distribution
-        if not quality_data.empty and 'product' in quality_data.columns and 'trade_name' in quality_data.columns:
-            product_counts = quality_data.groupby(['trade_name', 'product']).size().reset_index(name='count')
-            product_pcts = []
-            
-            for _, row in product_counts.iterrows():
-                pct = 100 * row['count'] / len(quality_data)
-                product_pcts.append(f"{row['trade_name']} - {row['product']}")
-                
-            if product_pcts:
-                product_stats = {
-                    'Report Section': 'Product Distribution',
-                    'Metric': product_pcts,
-                    'Value': [f"{count} ({100 * count / len(quality_data):.1f}%)" for count in product_counts['count']]
-                }
-                product_df = pd.DataFrame(product_stats)
-                report_sections.append(product_df)
-        
-        # Combine all report sections
-        report_data = pd.concat(report_sections, ignore_index=True)
+    # Add report period
+    period = doc.add_paragraph()
+    period.add_run('Report Period: ').bold = True
+    period.add_run(f"{start_date.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')}")
     
-    return report_data
+    # Add company logo if available
+    try:
+        doc.add_picture('logo.png', width=Inches(1.5))
+    except:
+        pass
+    
+    # Add comments section if provided
+    if comments:
+        doc.add_heading('Comments', level=2)
+        doc.add_paragraph(comments)
+    
+   # Check if we have data to process
+    if report_data.empty:
+        doc.add_paragraph("No data available for this report period.")
+    else:
+        # Process each report section - handle both 'Section' and 'Report Section' column names
+        section_column = None
+        for possible_column in ['Section', 'Report Section']:
+            if possible_column in report_data.columns:
+                section_column = possible_column
+                break
+    
+    # Process each report section
+    if section_column:
+        sections = report_data[section_column].unique()
+    else:
+        # Fallback if column was renamed
+        sections = ['All Data']  # Single section for all data
+    
+    for section in sections:
+        doc.add_heading(section, level=1)
+        if section_column in report_data.columns:
+            section_data = report_data[report_data['Section'] == section]
+        else:
+            section_data = report_data  # Use all data if no section column
+        
+        # Create table with available columns
+            available_columns = [col for col in ['Metric', 'Value'] if col in section_data.columns]
+            
+            if available_columns:
+                table = doc.add_table(rows=1, cols=len(available_columns))
+                table.style = 'Light Grid'
+        
+            # Header row
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].text = 'Metric'
+            hdr_cells[1].text = 'Value'
+            
+            # Add data rows
+            for _, row in section_data.iterrows():
+                row_cells = table.add_row().cells
+                for i, col in enumerate(available_columns):
+                            row_cells[i].text = str(row.get(col, ''))
+            
+            # Add visualizations for key sections if data is available
+                if 'BRIX' in section and 'Value' in section_data.columns:
+                    try:
+                        add_brix_chart(doc, section_data)
+                    except Exception as e:
+                        doc.add_paragraph(f"Could not generate BRIX chart: {str(e)}")
+                elif 'Torque' in section and 'Value' in section_data.columns:
+                    try:
+                        add_torque_chart(doc, section_data)
+                    except Exception as e:
+                        doc.add_paragraph(f"Could not generate Torque chart: {str(e)}")
+    
+    # Add footer
+    doc.add_paragraph().add_run(f"Report generated on {dt.datetime.now().strftime('%B %d, %Y at %H:%M')}").italic = True
+    
+    # Save to temporary file
+    temp_dir = tempfile.mkdtemp()
+    report_path = os.path.join(temp_dir, f'Quality_Report_{start_date.strftime("%Y%m%d")}_to_{end_date.strftime("%Y%m%d")}.docx')
+    doc.save(report_path)
+    
+    return report_path
+
+def add_brix_chart(doc, data):
+    """Add BRIX visualization to document"""
+    metrics = data['Metric'].tolist()
+    values = [float(v.split()[0]) for v in data['Value']]
+    
+    fig, ax = plt.subplots(figsize=(8, 4))
+    bars = ax.bar(metrics, values, color='#4e79a7')
+    ax.set_title('BRIX Measurements', pad=20)
+    ax.set_ylabel('BRIX Value')
+    
+    # Add value labels
+    for bar in bars:
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height,
+                f'{height:.2f}',
+                ha='center', va='bottom')
+    
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    
+    # Add to document
+    add_figure_to_doc(doc, fig, 'BRIX Measurement Results')
+    plt.close(fig)
+
+def add_torque_chart(doc, data):
+    """Add Torque visualization to document"""
+    metrics = data['Metric'].tolist()
+    values = [float(v.split()[0]) if '%' not in v else float(v.split('%')[0]) 
+              for v in data['Value']]
+    
+    fig, ax = plt.subplots(figsize=(10, 5))
+    colors = ['#4e79a7' if 'Average' in m else 
+              '#f28e2b' if 'Out of Range' in m else 
+              '#e15759' for m in metrics]
+    
+    bars = ax.bar(metrics, values, color=colors)
+    ax.set_title('Torque Performance', pad=20)
+    ax.set_ylabel('Value (Nm)' if 'Average' in metrics[0] else 'Percentage')
+    
+    # Add value labels
+    for bar in bars:
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height,
+                f'{height:.1f}{"%" if "%" in str(data["Value"].iloc[0]) else ""}',
+                ha='center', va='bottom')
+    
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    
+    # Add to document
+    add_figure_to_doc(doc, fig, 'Torque Measurement Results')
+    plt.close(fig)
+
+def add_figure_to_doc(doc, fig, caption):
+    """Helper to add matplotlib figures to Word doc"""
+    temp_dir = tempfile.mkdtemp()
+    img_path = os.path.join(temp_dir, 'temp_img.png')
+    fig.savefig(img_path, dpi=300, bbox_inches='tight')
+    doc.add_picture(img_path, width=Inches(6))
+    doc.add_paragraph(caption).alignment = WD_ALIGN_PARAGRAPH.CENTER
+    os.remove(img_path)
+    os.rmdir(temp_dir)
 
 def download_report(report_data, filename_prefix):
     """
-    Create a download link for the report
+    Create a download link for the Word report
     
     Args:
         report_data: DataFrame with report data
         filename_prefix: Prefix for the download filename
     """
-    # Create Excel file in memory
-    output = io.BytesIO()
+    # Parse the filename prefix to extract components
+    parts = filename_prefix.split('_')
+    if len(parts) < 4:
+        st.error("Invalid filename format. Expected: ReportType_YYYY-MM-DD_to_YYYY-MM-DD")
+        return
     
-    # Create a Pandas Excel writer using the BytesIO object
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        # Split the report by sections
-        sections = report_data['Report Section'].unique()
-        
-        for section in sections:
-            section_data = report_data[report_data['Report Section'] == section].copy()
-            section_data = section_data[['Metric', 'Value']]  # Remove section column
-            sheet_name = section[:31]  # Excel sheet names limited to 31 chars
-            section_data.to_excel(writer, sheet_name=sheet_name, index=False)
-            
-            # Set column widths
-            worksheet = writer.sheets[sheet_name]
-            worksheet.set_column('A:A', 30)
-            worksheet.set_column('B:B', 25)
-        
-        # Create a summary sheet that links to all other sheets
-        summary = pd.DataFrame({
-            'Section': sections,
-            'Link': ['Click to view'] * len(sections)
-        })
-        
-        summary.to_excel(writer, sheet_name='Summary', index=False)
-        worksheet = writer.sheets['Summary']
-        worksheet.set_column('A:A', 25)
-        worksheet.set_column('B:B', 15)
+    report_type = parts[0]
+    start_date_str = parts[1]
+    end_date_str = parts[3]
     
-    # Generate download link
-    b64 = base64.b64encode(output.getvalue()).decode()
-    today = dt.datetime.now().strftime('%Y%m%d')
-    filename = f"{filename_prefix}_{today}.xlsx"
-    href = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="{filename}">Download Excel Report</a>'
+    try:
+        # Convert string dates to datetime.date objects
+        start_date = dt.datetime.strptime(start_date_str, '%Y-%m-%d').date()
+        end_date = dt.datetime.strptime(end_date_str, '%Y-%m-%d').date()
+
+        # Generate the Word document
+        report_path = generate_report(
+            report_data=report_data,
+            report_type=report_type,
+            start_date=start_date,
+            end_date=end_date
+        )
     
-    st.markdown(href, unsafe_allow_html=True)
+        # Create download link
+        with open(report_path, 'rb') as f:
+            report_bytes = f.read()
+        
+        b64 = base64.b64encode(report_bytes).decode()
+        filename = f"{filename_prefix}.docx"
+        href = f'<a href="data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{b64}" download="{filename}">Download Word Report</a>'
+        
+        st.markdown(href, unsafe_allow_html=True)
+        
+        # Clean up
+        os.remove(report_path)
+        os.rmdir(os.path.dirname(report_path))
+
+    except ValueError as e:
+            st.error(f"Invalid date format in filename: {e}")
+    except Exception as e:
+            st.error(f"Error generating report: {e}")

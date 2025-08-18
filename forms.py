@@ -5,82 +5,116 @@ import numpy as np
 from database import save_torque_tamper_data, save_net_content_data, save_quality_check_data
 
 def display_torque_tamper_form(username, start_time, check_id):
-    """Display and process the Torque and Tamper Evidence form"""
+    """Display and process the Torque and Tamper Evidence form with historical time support"""
     st.subheader("Torque and Tamper Evidence Check")
     st.write(f"Check ID: {check_id}")
-    st.write(f"Start Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     
     with st.form("torque_tamper_form"):
-        # Add timestamp selection for historical data entry
-        st.write("#### Timestamp (for historical data entry)")
+        # Historical timestamp selection
+        st.write("#### Measurement Timestamp")
         col1, col2 = st.columns(2)
         with col1:
-            entry_date = st.date_input("Date", value=dt.date.today())
+            # Default to the provided start_time's date, or today if not available
+            default_date = start_time.date() if isinstance(start_time, dt.datetime) else dt.date.today()
+            entry_date = st.date_input(
+                "Date", 
+                value=default_date,
+                min_value=dt.date(2000, 1, 1),  # Earliest allowed date
+                max_value=dt.date.today()       # Can't select future dates
+            )
         with col2:
-            entry_time = st.time_input("Time", value=dt.datetime.now().time())
+            # Default to the provided start_time's time, or current time if not available
+            default_time = (start_time.time() if isinstance(start_time, dt.datetime) 
+                          else dt.datetime.now().time())
+            entry_time = st.time_input("Time", value=default_time)
         
-        custom_timestamp = dt.datetime.combine(entry_date, entry_time)
-        st.caption("Leave at current date/time for real-time entries or adjust for historical data")
+        # Combine into final timestamp - this will be used as start_time in the database
+        measurement_timestamp = dt.datetime.combine(entry_date, entry_time)
+        st.caption("Adjust for historical records or leave as-is for current time")
+        st.write(f"**Measurement will be recorded for:** {measurement_timestamp.strftime('%Y-%m-%d %H:%M')}")
+        
         st.write("#### Torque Values (5-12 range)")
-        
         col1, col2 = st.columns(2)
         
         with col1:
-            head1_torque = st.number_input("Rotary Head 1 Torque", min_value=0.0, max_value=20.0, step=0.1)
-            head2_torque = st.number_input("Rotary Head 2 Torque", min_value=0.0, max_value=20.0, step=0.1)
-            head3_torque = st.number_input("Rotary Head 3 Torque", min_value=0.0, max_value=20.0, step=0.1)
+            head1_torque = st.number_input("Rotary Head 1 Torque", min_value=0.0, max_value=20.0, step=1.0, value=1.0)
+            head2_torque = st.number_input("Rotary Head 2 Torque", min_value=0.0, max_value=20.0, step=1.0, value=1.0)
+            head3_torque = st.number_input("Rotary Head 3 Torque", min_value=0.0, max_value=20.0, step=1.0, value=1.0)
         
         with col2:
-            head4_torque = st.number_input("Rotary Head 4 Torque", min_value=0.0, max_value=20.0, step=0.1)
-            head5_torque = st.number_input("Rotary Head 5 Torque", min_value=0.0, max_value=20.0, step=0.1)
+            head4_torque = st.number_input("Rotary Head 4 Torque", min_value=0.0, max_value=20.0, step=1.0, value=1.0)
+            head5_torque = st.number_input("Rotary Head 5 Torque", min_value=0.0, max_value=20.0, step=1.0, value=1.0)
         
         st.write("#### Tamper Evidence")
         tamper_evidence = st.radio(
             "Tamper Evidence Status",
-            options=["PASS (Seal INTACT)", "FAIL (Seal BROKEN)"]
+            options=["PASS (Seal INTACT)", "FAIL (Seal BROKEN)"],
+            index=0  # Default to PASS
         )
         
-        comments = st.text_area("Comments", height=100)
+        comments = st.text_area("Comments", height=100, placeholder="Enter any additional notes...")
         
         submit_button = st.form_submit_button("Submit Check")
         
         if submit_button:
             # Validate form
             if not all([head1_torque, head2_torque, head3_torque, head4_torque, head5_torque]):
-                st.error("Please enter all torque values.")
+                st.error("Please enter all torque values (0 is not a valid entry).")
             else:
-                # Check if any torque value is outside the acceptable range
-                torque_values = [head1_torque, head2_torque, head3_torque, head4_torque, head5_torque]
-                out_of_range = [val for val in torque_values if val < 5 or val > 12]
-                
-                # Prepare data for saving
-                data = {
-                    'check_id': check_id,
-                    'username': username,
-                    'timestamp': custom_timestamp,  # Use custom timestamp for historical data entry
-                    'start_time': start_time,
+                # Check torque values against acceptable range
+                torque_values = {
                     'head1_torque': head1_torque,
                     'head2_torque': head2_torque,
                     'head3_torque': head3_torque,
                     'head4_torque': head4_torque,
-                    'head5_torque': head5_torque,
-                    'tamper_evidence': tamper_evidence,
-                    'comments': comments
+                    'head5_torque': head5_torque
                 }
                 
-                # Save data to database
-                if save_torque_tamper_data(data):
-                    st.success("Check data saved successfully!")
+                # Categorize out-of-range values
+                below_range = {head: val for head, val in torque_values.items() if val < 5}
+                above_range = {head: val for head, val in torque_values.items() if val > 12}
+                
+                # Prepare detailed feedback
+                messages = []
+                if below_range:
+                    messages.append(f"LOW TORQUE: {', '.join([f'{head} ({val} Nm)' for head, val in below_range.items()])}")
+                if above_range:
+                    messages.append(f"HIGH TORQUE: {', '.join([f'{head} ({val} Nm)' for head, val in above_range.items()])}")
+                
+                # Save data regardless of being in range (for process analysis)
+                data = {
+                    'check_id': check_id,
+                    'username': username,
+                    'timestamp': measurement_timestamp,
+                    'start_time': start_time,
+                    'head1_torque': head1_torque,  # Changed from 'Head 1'
+                    'head2_torque': head2_torque,  # Changed from 'Head 2'
+                    'head3_torque': head3_torque,  # Changed from 'Head 3'
+                    'head4_torque': head4_torque,  # Changed from 'Head 4'
+                    'head5_torque': head5_torque,  # Changed from 'Head 5'
+                    'average_torque': sum(torque_values.values()) / len(torque_values),
+                    'min_torque': min(torque_values.values()),
+                    'max_torque': max(torque_values.values()),
+                    'below_range': below_range,
+                    'above_range': above_range,
+                    'tamper_evidence': tamper_evidence,
+                    'comments': comments,
+                    'is_within_spec': not (below_range or above_range)
+                }
+                
+                if save_torque_tamper_data(data):  # Your save function
+                    if messages:
+                        st.warning("Check saved with out-of-range values (process monitoring):")
+                        for msg in messages:
+                            st.warning(msg)
+                        st.info("These values have been recorded for process analysis.")
+                    else:
+                        st.success("All torque values within specification (5-12 Nm). Data saved successfully!")
                     
-                    # Display warning for out-of-range values
-                    if out_of_range:
-                        st.warning(f"Warning: {len(out_of_range)} torque values are outside the acceptable range (5-12).")
-                    
-                    # Reset form
                     st.session_state.form_type = None
                     st.rerun()
                 else:
-                    st.error("Failed to save check data. Please try again.")
+                    st.error("Failed to save torque check data. Please try again.")
 
 def display_net_content_form(username, start_time, check_id):
     """Display and process the NET CONTENT form with enhanced volume selection"""
@@ -89,7 +123,7 @@ def display_net_content_form(username, start_time, check_id):
     st.write(f"Start Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     
     with st.form("net_content_form"):
-        # Add timestamp selection for historical data entry
+        # Timestamp selection
         st.write("#### Timestamp (for historical data entry)")
         col1, col2 = st.columns(2)
         with col1:
@@ -100,91 +134,58 @@ def display_net_content_form(username, start_time, check_id):
         custom_timestamp = dt.datetime.combine(entry_date, entry_time)
         st.caption("Leave at current date/time for real-time entries or adjust for historical data")
         
+        # Measurement inputs
         col1, col2 = st.columns(2)
         
         with col1:
-            brix = st.number_input("BRIX Value", min_value=0.0, step=0.1)
+            brix = st.number_input("BRIX Value", min_value=0.0, step=0.1, format="%.2f")
             titration_acid = st.number_input("Titration Acid", min_value=0.0, step=0.01, 
-                                            help="Enter value or leave at 0 for Not Applicable")
-            density = st.number_input("Density", min_value=0.0, step=0.001)
+                                          value=0.0, format="%.2f",
+                                          help="Enter value or leave at 0 for Not Applicable")
+            density = st.number_input("Density", min_value=0.0, step=0.001, format="%.5f")
         
         with col2:
-            tare = st.number_input("Tare", min_value=0.0, step=0.1)
+            tare = st.number_input("Tare", min_value=0.0, step=0.1, format="%.2f")
             
-            # Enhanced Nominal Volume Selection
-            st.write("Nominal Volume (ml)")
-            VOLUME_OPTIONS = [330, 500, 1000, 2000, 5000]
-            
-            # Initialize selected volume if not exists
-            if 'nominal_volume' not in st.session_state:
-                st.session_state.nominal_volume = VOLUME_OPTIONS[1]  # Default to 500ml
-            
-            # Create columns for volume control
-            vol_col1, vol_col2, vol_col3 = st.columns([1, 3, 1])
-            
-            with vol_col1:
-                if st.button("◄", key="vol_dec"):
-                    current_idx = VOLUME_OPTIONS.index(st.session_state.nominal_volume)
-                    new_idx = max(0, current_idx - 1)
-                    st.session_state.nominal_volume = VOLUME_OPTIONS[new_idx]
-            
-            with vol_col2:
-                selected_volume = st.selectbox(
-                    "",
-                    options=VOLUME_OPTIONS,
-                    index=VOLUME_OPTIONS.index(st.session_state.nominal_volume),
-                    key="vol_select",
-                    label_visibility="collapsed"
-                )
-                st.session_state.nominal_volume = selected_volume
-            
-            with vol_col3:
-                if st.button("►", key="vol_inc"):
-                    current_idx = VOLUME_OPTIONS.index(st.session_state.nominal_volume)
-                    new_idx = min(len(VOLUME_OPTIONS)-1, current_idx + 1)
-                    st.session_state.nominal_volume = VOLUME_OPTIONS[new_idx]
+            # Nominal Volume Selection
+            VOLUME_OPTIONS = [330, 400, 500, 1000, 2000, 5000]
+            nominal_volume = st.selectbox(
+                "Nominal Volume (ml)",
+                options=VOLUME_OPTIONS,
+                index=None,  # No default selection
+                placeholder="Select volume...",
+                help="Select the nominal volume for this check"
+            )
         
+        # Bottle weights
         st.write("#### Bottle Weights")
-        
         col1, col2, col3, col4, col5 = st.columns(5)
+        with col1: bottle1_weight = st.number_input("Bottle 1", min_value=0.0, step=0.1, format="%.1f")
+        with col2: bottle2_weight = st.number_input("Bottle 2", min_value=0.0, step=0.1, format="%.1f")
+        with col3: bottle3_weight = st.number_input("Bottle 3", min_value=0.0, step=0.1, format="%.1f")
+        with col4: bottle4_weight = st.number_input("Bottle 4", min_value=0.0, step=0.1, format="%.1f")
+        with col5: bottle5_weight = st.number_input("Bottle 5", min_value=0.0, step=0.1, format="%.1f")
         
-        with col1:
-            bottle1_weight = st.number_input("Bottle 1", min_value=0.0, step=0.1)
-        
-        with col2:
-            bottle2_weight = st.number_input("Bottle 2", min_value=0.0, step=0.1)
-        
-        with col3:
-            bottle3_weight = st.number_input("Bottle 3", min_value=0.0, step=0.1)
-        
-        with col4:
-            bottle4_weight = st.number_input("Bottle 4", min_value=0.0, step=0.1)
-        
-        with col5:
-            bottle5_weight = st.number_input("Bottle 5", min_value=0.0, step=0.1)
-        
-        # Calculate average weight automatically
+        # Calculate average weight
         bottle_weights = [bottle1_weight, bottle2_weight, bottle3_weight, bottle4_weight, bottle5_weight]
-        
-        if all(bottle_weights):
+        if all(w > 0 for w in bottle_weights):
             average_weight = sum(bottle_weights) / len(bottle_weights)
             st.metric("Average Weight", f"{average_weight:.2f}")
         else:
             average_weight = 0.0
             st.info("Enter all bottle weights to calculate the average")
         
-        net_content = st.number_input("Net Content", min_value=0.0, step=0.1)
-        
+        net_content = average_weight - tare
+        st.metric("Net Content", value=f"{net_content:.2f}")  # Shows with 2 decimal places
         comments = st.text_area("Comments", height=100)
         
+        # Submit button - must be at the bottom of the form
         submit_button = st.form_submit_button("Submit Check")
         
         if submit_button:
-            # Validate form
-            if not all([brix, density, tare] + bottle_weights):
+            if not all([brix, density, tare, nominal_volume] + bottle_weights):
                 st.error("Please enter all required values.")
             else:
-                # Prepare data for saving
                 data = {
                     'check_id': check_id,
                     'username': username,
@@ -194,7 +195,7 @@ def display_net_content_form(username, start_time, check_id):
                     'titration_acid': titration_acid if titration_acid > 0 else None,
                     'density': density,
                     'tare': tare,
-                    'nominal_volume': st.session_state.nominal_volume,  # Using the selected volume
+                    'nominal_volume': nominal_volume,
                     'bottle1_weight': bottle1_weight,
                     'bottle2_weight': bottle2_weight,
                     'bottle3_weight': bottle3_weight,
@@ -205,11 +206,8 @@ def display_net_content_form(username, start_time, check_id):
                     'comments': comments
                 }
                 
-                # Save data to database
                 if save_net_content_data(data):
                     st.success("Check data saved successfully!")
-                    
-                    # Reset form
                     st.session_state.form_type = None
                     st.rerun()
                 else:

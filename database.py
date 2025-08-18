@@ -28,9 +28,24 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
+import os
+import json
+import time
+import logging
+import pandas as pd
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from sqlalchemy import create_engine, text
+import streamlit as st
+
+logger = logging.getLogger(__name__)
+
 class BeverageQADatabase:
     def __init__(self):
-        self.DATABASE_URL = os.getenv('DATABASE_URL') 
+        self.DATABASE_URL = os.getenv('DATABASE_URL')
+        self.connection = None  # Initialize psycopg2 connection attribute
+        self._engine = None     # SQLAlchemy engine
+        
         if not self.DATABASE_URL:
             logger.critical("DATABASE_URL environment variable not set")
             st.error("""
@@ -61,6 +76,17 @@ class BeverageQADatabase:
             Error Details: {str(e)}
             """)
             raise ConnectionError("Could not establish database connection") from e
+
+    def _create_connection(self):
+        """Create a new psycopg2 database connection"""
+        try:
+            return psycopg2.connect(
+                self.DATABASE_URL,
+                cursor_factory=RealDictCursor
+            )
+        except Exception as e:
+            logger.error(f"Connection failed: {str(e)}")
+            raise ConnectionError(f"Could not connect to database: {str(e)}")
 
     def _obfuscated_db_url(self):
         """Return a safe version of the DB URL for error messages"""
@@ -102,16 +128,17 @@ class BeverageQADatabase:
                 time.sleep(2 ** attempt)  # Exponential backoff
 
     def get_engine(self):
-        if not hasattr(self, '_engine'):
+        """Get SQLAlchemy engine with connection pooling"""
+        if not self._engine:
             logger.info("Creating new database engine")
             try: 
                 self._engine = create_engine(
                     self.DATABASE_URL,
                     pool_size=5,           # Number of permanent connections
-                    max_overflow=10,        # Additional connections when needed
-                    pool_timeout=30,        # Wait 30 seconds for connection
-                    pool_pre_ping=True,     # Test connections before use
-                    pool_recycle=300         # Recycle connections after 5 minutes
+                    max_overflow=10,       # Additional connections when needed
+                    pool_timeout=30,       # Wait 30 seconds for connection
+                    pool_pre_ping=True,    # Test connections before use
+                    pool_recycle=300       # Recycle connections after 5 minutes
                 )
                 logger.info("Database engine created successfully")
             except Exception as e:
@@ -137,25 +164,21 @@ class BeverageQADatabase:
                 )
                 '''))
                 
-                # Add the permissions column if it doesn't exist
+                
+                # Create user_settings table for additional user preferences
                 conn.execute(text('''
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 
-                        FROM information_schema.columns 
-                        WHERE table_name='users' AND column_name='permissions'
-                    ) THEN
-                        ALTER TABLE users ADD COLUMN permissions JSONB;
-                    END IF;
-                END $$;
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    username TEXT PRIMARY KEY REFERENCES users(username),
+                    last_tab TEXT DEFAULT 'Dashboard',
+                    preferences JSONB
+                )
                 '''))
                 
                 # Create torque_tamper table
                 conn.execute(text('''
                 CREATE TABLE IF NOT EXISTS torque_tamper (
                     check_id TEXT PRIMARY KEY,
-                    username TEXT NOT NULL,
+                    username TEXT NOT NULL REFERENCES users(username),
                     timestamp TIMESTAMP NOT NULL,
                     start_time TIMESTAMP NOT NULL,
                     head1_torque FLOAT,
@@ -164,8 +187,7 @@ class BeverageQADatabase:
                     head4_torque FLOAT,
                     head5_torque FLOAT,
                     tamper_evidence TEXT,
-                    comments TEXT,
-                    FOREIGN KEY (username) REFERENCES users(username)
+                    comments TEXT
                 )
                 '''))
                 
@@ -173,7 +195,7 @@ class BeverageQADatabase:
                 conn.execute(text('''
                 CREATE TABLE IF NOT EXISTS net_content (
                     check_id TEXT PRIMARY KEY,
-                    username TEXT NOT NULL,
+                    username TEXT NOT NULL REFERENCES users(username),
                     timestamp TIMESTAMP NOT NULL,
                     start_time TIMESTAMP NOT NULL,
                     brix FLOAT,
@@ -188,8 +210,7 @@ class BeverageQADatabase:
                     bottle5_weight FLOAT,
                     average_weight FLOAT,
                     net_content FLOAT,
-                    comments TEXT,
-                    FOREIGN KEY (username) REFERENCES users(username)
+                    comments TEXT
                 )
                 '''))
                 
@@ -197,7 +218,7 @@ class BeverageQADatabase:
                 conn.execute(text('''
                 CREATE TABLE IF NOT EXISTS quality_check (
                     check_id TEXT PRIMARY KEY,
-                    username TEXT NOT NULL,
+                    username TEXT NOT NULL REFERENCES users(username),
                     timestamp TIMESTAMP NOT NULL,
                     start_time TIMESTAMP NOT NULL,
                     trade_name TEXT,
@@ -227,8 +248,7 @@ class BeverageQADatabase:
                     foreign_material_test TEXT,
                     container_rinse_inspection TEXT,
                     container_rinse_water_odour TEXT,
-                    comments TEXT,
-                    FOREIGN KEY (username) REFERENCES users(username)
+                    comments TEXT
                 )
                 '''))
                 
@@ -241,8 +261,7 @@ class BeverageQADatabase:
                     parameter TEXT NOT NULL,
                     value FLOAT NOT NULL,
                     timestamp TIMESTAMP NOT NULL,
-                    username TEXT NOT NULL,
-                    FOREIGN KEY (username) REFERENCES users(username)
+                    username TEXT NOT NULL REFERENCES users(username)
                 )
                 '''))
                 
@@ -258,8 +277,7 @@ class BeverageQADatabase:
                     ppk FLOAT,
                     sigma FLOAT,
                     timestamp TIMESTAMP NOT NULL,
-                    username TEXT NOT NULL,
-                    FOREIGN KEY (username) REFERENCES users(username)
+                    username TEXT NOT NULL REFERENCES users(username)
                 )
                 '''))
                 
@@ -268,14 +286,12 @@ class BeverageQADatabase:
                 CREATE TABLE IF NOT EXISTS shift_handover (
                     id SERIAL PRIMARY KEY,
                     shift TEXT NOT NULL,
-                    handover_from TEXT NOT NULL,
-                    handover_to TEXT NOT NULL,
+                    handover_from TEXT NOT NULL REFERENCES users(username),
+                    handover_to TEXT NOT NULL REFERENCES users(username),
                     timestamp TIMESTAMP NOT NULL,
                     notes TEXT,
                     issues TEXT,
-                    actions TEXT,
-                    FOREIGN KEY (handover_from) REFERENCES users(username),
-                    FOREIGN KEY (handover_to) REFERENCES users(username)
+                    actions TEXT
                 )
                 '''))
                 
@@ -288,9 +304,8 @@ class BeverageQADatabase:
                     unit TEXT NOT NULL,
                     location TEXT,
                     last_checked TIMESTAMP,
-                    checked_by TEXT,
-                    notes TEXT,
-                    FOREIGN KEY (checked_by) REFERENCES users(username)
+                    checked_by TEXT REFERENCES users(username),
+                    notes TEXT
                 )
                 '''))
                 
@@ -302,7 +317,28 @@ class BeverageQADatabase:
                 st.error(f"Error initializing database: {e}")
                 raise
 
-    # Data Operations
+    def execute_query(self, query, params=None):
+        """Execute a SQL query and return results as DataFrame using psycopg2"""
+        if not self.connection or self.connection.closed:
+            self.connection = self._create_connection()
+            
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(query, params or ())
+                if cursor.description:  # If it's a SELECT query
+                    columns = [col[0] for col in cursor.description]
+                    data = cursor.fetchall()
+                    return pd.DataFrame(data, columns=columns)
+                self.connection.commit()
+                return pd.DataFrame({'status': ['success']})  # For non-SELECT queries
+        except Exception as e:
+            logger.error(f"Query failed: {str(e)}")
+            if self.connection:
+                self.connection.rollback()
+            st.error(f"Database query failed: {str(e)}")
+            return pd.DataFrame()
+
+    # Data Operations (using SQLAlchemy)
     def save_torque_tamper(self, data):
         """Save torque and tamper evidence data"""
         with self.get_engine().connect() as conn:
@@ -379,7 +415,7 @@ class BeverageQADatabase:
                 st.error(f"Error saving quality check data: {e}")
                 return False
 
-    # Data Retrieval
+    # Data Retrieval Methods
     def get_all_users_data(self):
         """
         Retrieve all users data with robust permission handling
@@ -391,287 +427,264 @@ class BeverageQADatabase:
         # Define consistent columns for all return paths
         result_columns = ['username', 'role', 'created_at', 'last_login', 'permissions']
         
-        with self.get_engine().connect() as conn:
-            try:
-                # Execute query with explicit column selection
-                result = conn.execute(text("""
-                SELECT 
-                    username, 
-                    role, 
-                    created_at, 
-                    last_login,
-                    CASE 
-                        WHEN permissions IS NULL THEN '{}'::jsonb
-                        ELSE permissions
-                    END AS permissions
-                FROM users
-                ORDER BY username ASC
-                """))
-                
-                # Process results efficiently
-                users_data = []
-                for row in result.mappings():  # Get rows as dictionaries
-                    try:
-                        # Handle permissions conversion
-                        permissions = row['permissions']
-                        if isinstance(permissions, str):
-                            permissions = json.loads(permissions)
-                        
-                        users_data.append({
-                            'username': row['username'],
-                            'role': row['role'],
-                            'created_at': row['created_at'],
-                            'last_login': row['last_login'],
-                            'permissions': permissions or {}  # Ensure dict
-                        })
-                    except (json.JSONDecodeError, KeyError) as e:
-                        logger.warning(f"Permission parsing error for user {row.get('username')}: {e}")
-                        continue
-                
-                # Create DataFrame with consistent structure
-                if users_data:
-                    return pd.DataFrame(users_data, columns=result_columns)
-                
-                return pd.DataFrame(columns=result_columns)
-                
-            except Exception as e:
-                logger.error(f"Database error in get_all_users_data: {str(e)}")
-                st.error("Error retrieving user data. Please try again.")
-                return pd.DataFrame(columns=result_columns)
-        
+        try:
+            result = self.execute_query("""
+            SELECT 
+                username, 
+                role, 
+                created_at, 
+                last_login,
+                COALESCE(permissions, '{}'::jsonb) as permissions
+            FROM users
+            ORDER BY username ASC
+            """)
+            
+            if not result.empty:
+                # Process permissions
+                result['permissions'] = result['permissions'].apply(
+                    lambda x: json.loads(x) if isinstance(x, str) else (x or {})
+                )
+                return result[result_columns]
+            
+            return pd.DataFrame(columns=result_columns)
+            
+        except Exception as e:
+            logger.error(f"Database error in get_all_users_data: {str(e)}")
+            st.error("Error retrieving user data. Please try again.")
+            return pd.DataFrame(columns=result_columns)
+    
     def update_user_permissions(self, username, permissions):
         """Update a user's permissions"""
-        with self.get_engine().connect() as conn:
-            try:
-                conn.execute(
-                    text("UPDATE users SET permissions = :permissions WHERE username = :username"),
-                    {
-                        'permissions': json.dumps(permissions),
-                        'username': username
-                    }
-                )
-                conn.commit()
-                return True
-            except Exception as e:
-                conn.rollback()
-                st.error(f"Error updating user permissions: {e}")
-                return False
-            
+        try:
+            result = self.execute_query(
+                "UPDATE users SET permissions = %s WHERE username = %s RETURNING 1",
+                (json.dumps(permissions), username))
+            return not result.empty
+        except Exception as e:
+            st.error(f"Error updating user permissions: {e}")
+            return False
+
     def get_user_checks(self, username, limit=10):
         """Get recent checks for a specific user"""
-        with self.get_engine().connect() as conn:
-            try:
-                result = conn.execute(text("""
-                SELECT check_id, 'Torque & Tamper' as check_type, username, timestamp,
-                       NULL as trade_name, NULL as product
-                FROM torque_tamper
-                WHERE username = :username
-                UNION ALL
-                SELECT check_id, 'Net Content' as check_type, username, timestamp,
-                      NULL as trade_name, NULL as product
-                FROM net_content
-                WHERE username = :username
-                UNION ALL
-                SELECT check_id, '30-Min Check' as check_type, username, timestamp,
-                       trade_name, product
-                FROM quality_check
-                WHERE username = :username
-                ORDER BY timestamp DESC
-                LIMIT :limit
-                """), {'username': username, 'limit': limit})
-                
-                df = pd.DataFrame(result.fetchall(), columns=result.keys())
-                if not df.empty:
-                    df['timestamp'] = pd.to_datetime(df['timestamp'])
-                return df
-            except Exception as e:
-                st.error(f"Error retrieving user checks: {e}")
-                return pd.DataFrame()
+        try:
+            df = self.execute_query("""
+            SELECT check_id, 'Torque & Tamper' as check_type, username, timestamp,
+                   NULL as trade_name, NULL as product
+            FROM torque_tamper
+            WHERE username = %s
+            UNION ALL
+            SELECT check_id, 'Net Content' as check_type, username, timestamp,
+                  NULL as trade_name, NULL as product
+            FROM net_content
+            WHERE username = %s
+            UNION ALL
+            SELECT check_id, '30-Min Check' as check_type, username, timestamp,
+                   trade_name, product
+            FROM quality_check
+            WHERE username = %s
+            ORDER BY timestamp DESC
+            LIMIT %s
+            """, (username, username, username, limit))
+            
+            if not df.empty:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+            return df
+        except Exception as e:
+            st.error(f"Error retrieving user checks: {e}")
+            return pd.DataFrame()
 
     def get_public_checks(self, limit=5):
         """Get public checks (limited information)"""
-        with self.get_engine().connect() as conn:
-            try:
-                result = conn.execute(text("""
-                SELECT check_id, 'Torque & Tamper' as check_type, timestamp,
-                       NULL as trade_name, NULL as product
-                FROM torque_tamper
-                UNION ALL
-                SELECT check_id, 'Net Content' as check_type, timestamp,
-                      NULL as trade_name, NULL as product
-                FROM net_content
-                UNION ALL
-                SELECT check_id, '30-Min Check' as check_type, timestamp,
-                       trade_name, product
-                FROM quality_check
-                ORDER BY timestamp DESC
-                LIMIT :limit
-                """), {'limit': limit})
-                
-                df = pd.DataFrame(result.fetchall(), columns=result.keys())
-                if not df.empty:
-                    df['timestamp'] = pd.to_datetime(df['timestamp'])
-                return df
-            except Exception as e:
-                st.error(f"Error retrieving public checks: {e}")
-                return pd.DataFrame()
+        try:
+            df = self.execute_query("""
+            SELECT check_id, 'Torque & Tamper' as check_type, timestamp,
+                   NULL as trade_name, NULL as product
+            FROM torque_tamper
+            UNION ALL
+            SELECT check_id, 'Net Content' as check_type, timestamp,
+                  NULL as trade_name, NULL as product
+            FROM net_content
+            UNION ALL
+            SELECT check_id, '30-Min Check' as check_type, timestamp,
+                   trade_name, product
+            FROM quality_check
+            ORDER BY timestamp DESC
+            LIMIT %s
+            """, (limit,))
+            
+            if not df.empty:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+            return df
+        except Exception as e:
+            st.error(f"Error retrieving public checks: {e}")
+            return pd.DataFrame()
 
-    def get_recent_checks(self, limit=10):
+    def get_recent_checks(self, limit=10, include_measurements=False):
         """Get recent checks from all tables (full access)"""
-        with self.get_engine().connect() as conn:
-            try:
-                result = conn.execute(text("""
-                SELECT check_id, 'Torque & Tamper' as check_type, username, timestamp,
-                       NULL as trade_name, NULL as product
-                FROM torque_tamper
-                UNION ALL
-                SELECT check_id, 'Net Content' as check_type, username, timestamp,
-                      NULL as trade_name, NULL as product
-                FROM net_content
-                UNION ALL
-                SELECT check_id, '30-Min Check' as check_type, username, timestamp,
-                       trade_name, product
-                FROM quality_check
-                ORDER BY timestamp DESC
-                LIMIT :limit
-                """), {'limit': limit})
-                
-                df = pd.DataFrame(result.fetchall(), columns=result.keys())
-                if not df.empty:
-                    df['timestamp'] = pd.to_datetime(df['timestamp'])
-                return df
-            except Exception as e:
-                st.error(f"Error retrieving recent checks: {e}")
-                return pd.DataFrame()
+        try:
+            df = self.execute_query("""
+            SELECT check_id, 'Torque & Tamper' as check_type, username, timestamp,
+                   NULL as trade_name, NULL as product
+            FROM torque_tamper
+            UNION ALL
+            SELECT check_id, 'Net Content' as check_type, username, timestamp,
+                  NULL as trade_name, NULL as product
+            FROM net_content
+            UNION ALL
+            SELECT check_id, '30-Min Check' as check_type, username, timestamp,
+                   trade_name, product
+            FROM quality_check
+            ORDER BY timestamp DESC
+            LIMIT %s
+            """, (limit,))
+            
+            if not df.empty:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+            return df
+        except Exception as e:
+            st.error(f"Error retrieving recent checks: {e}")
+            return pd.DataFrame()
 
     def get_check_data(self, start_date, end_date, product_filter=None):
         """Get combined check data for visualization or reporting"""
-        with self.get_engine().connect() as conn:
-            try:
-                # Start with an empty DataFrame
-                combined_data = pd.DataFrame()
-                
-                # Get torque and tamper data
-                torque_result = conn.execute(text("""
-                SELECT * FROM torque_tamper 
-                WHERE timestamp BETWEEN :start_date AND :end_date
-                """), {
-                    'start_date': start_date,
-                    'end_date': end_date
-                })
-                torque_df = pd.DataFrame(torque_result.fetchall(), columns=torque_result.keys())
-                
-                # Get net content data
-                net_result = conn.execute(text("""
-                SELECT * FROM net_content 
-                WHERE timestamp BETWEEN :start_date AND :end_date
-                """), {
-                    'start_date': start_date,
-                    'end_date': end_date
-                })
-                net_df = pd.DataFrame(net_result.fetchall(), columns=net_result.keys())
-                
-                # Get quality check data with optional product filter
-                quality_params = {
-                    'start_date': start_date,
-                    'end_date': end_date
-                }
-                
-                if product_filter and 'All' not in product_filter:
-                    placeholders = []
-                    for i, product in enumerate(product_filter):
-                        param_name = f"product_{i}"
-                        placeholders.append(f":product_{i}")
-                        quality_params[param_name] = product
-                    
-                    product_clause = f" AND product IN ({','.join(placeholders)})"
-                    quality_query = text(f"""
-                    SELECT * FROM quality_check 
-                    WHERE timestamp BETWEEN :start_date AND :end_date
-                    {product_clause}
-                    """)
-                else:
-                    quality_query = text("""
-                    SELECT * FROM quality_check 
-                    WHERE timestamp BETWEEN :start_date AND :end_date
-                    """)
-                    
-                quality_result = conn.execute(quality_query, quality_params)
-                quality_df = pd.DataFrame(quality_result.fetchall(), columns=quality_result.keys())
-                
-                # Convert timestamp strings to datetime
-                for df in [torque_df, net_df, quality_df]:
-                    if not df.empty:
-                        df['timestamp'] = pd.to_datetime(df['timestamp'])
-                        df['start_time'] = pd.to_datetime(df['start_time'])
-                
-                # Combine all data
-                combined_data = pd.concat([
-                    torque_df.assign(source='torque_tamper'),
-                    net_df.assign(source='net_content'),
-                    quality_df.assign(source='quality_check')
-                ], ignore_index=True)
-                
-                return combined_data
-                
-            except Exception as e:
-                st.error(f"Error retrieving check data: {e}")
-                return pd.DataFrame()
+        try:
+            # Start with an empty DataFrame
+            combined_data = pd.DataFrame()
             
+            # Get torque and tamper data
+            torque_df = self.execute_query("""
+            SELECT *, 'torque_tamper' as source FROM torque_tamper 
+            WHERE timestamp BETWEEN %s AND %s
+            """, (start_date, end_date))
+            
+            # Get net content data
+            net_df = self.execute_query("""
+            SELECT *, 'net_content' as source FROM net_content 
+            WHERE timestamp BETWEEN %s AND %s
+            """, (start_date, end_date))
+            
+            # Get quality check data with optional product filter
+            if product_filter and 'All' not in product_filter:
+                placeholders = ','.join(['%s'] * len(product_filter))
+                quality_query = f"""
+                SELECT *, 'quality_check' as source FROM quality_check 
+                WHERE timestamp BETWEEN %s AND %s
+                AND product IN ({placeholders})
+                """
+                quality_df = self.execute_query(
+                    quality_query, 
+                    [start_date, end_date] + product_filter
+                )
+            else:
+                quality_df = self.execute_query("""
+                SELECT *, 'quality_check' as source FROM quality_check 
+                WHERE timestamp BETWEEN %s AND %s
+                """, (start_date, end_date))
+            
+            # Convert timestamp strings to datetime
+            for df in [torque_df, net_df, quality_df]:
+                if not df.empty:
+                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                    if 'start_time' in df.columns:
+                        df['start_time'] = pd.to_datetime(df['start_time'])
+            
+            # --- NEW IMPROVED CONCATENATION LOGIC ---
+            # Get all possible columns across all DataFrames
+            all_columns = set()
+            for df in [torque_df, net_df, quality_df]:
+                all_columns.update(df.columns)
+            
+            # Create template with all possible columns
+            template_columns = list(all_columns)
+            
+            # Align each DataFrame with the template
+            dfs_to_concat = []
+            for df in [torque_df, net_df, quality_df]:
+                if not df.empty:
+                    # Ensure all columns exist (add missing as NaN)
+                    aligned_df = df.reindex(columns=template_columns)
+                    dfs_to_concat.append(aligned_df)
+            
+            # Concatenate all aligned DataFrames
+            if dfs_to_concat:
+                combined_data = pd.concat(dfs_to_concat, ignore_index=True)
+            else:
+                combined_data = pd.DataFrame(columns=template_columns)
+            
+            # Convert datetime columns to timezone-naive if needed
+            datetime_cols = ['timestamp', 'start_time']
+            for col in datetime_cols:
+                if col in combined_data.columns:
+                    combined_data[col] = pd.to_datetime(combined_data[col])
+            
+            return combined_data
+            
+        except Exception as e:
+            st.error(f"Error retrieving check data: {e}")
+            return pd.DataFrame()
+    
     def test_connection(self):
         """Test database connection and basic functionality"""
         logger.info("Testing database connection")
         try:
+            # Test both SQLAlchemy and psycopg2 connections
             with self.get_engine().connect() as conn:
-                # Test simple query
                 if conn.execute(text("SELECT 1")).scalar() != 1:
-                    logger.warning("Basic connection test failed")
+                    logger.warning("SQLAlchemy connection test failed")
                     return False
+            
+            # Test psycopg2 connection
+            test_result = self.execute_query("SELECT 1")
+            if test_result.empty or test_result.iloc[0, 0] != 1:
+                logger.warning("Psycopg2 connection test failed")
+                return False
                 
-                # Verify critical tables exist
-                required_tables = ['users', 'torque_tamper', 'net_content', 'quality_check']
-                for table in required_tables:
-                    if not conn.execute(
-                        text("SELECT 1 FROM information_schema.tables WHERE table_name = :table"),
-                        {'table': table}
-                    ).scalar():
-                        logger.error(f"Missing required table: {table}")
-                        return False
-                
-                logger.info("Database connection test passed")
-                return True
-                
+            # Verify critical tables exist
+            required_tables = ['users', 'torque_tamper', 'net_content', 'quality_check']
+            for table in required_tables:
+                result = self.execute_query(
+                    "SELECT 1 FROM information_schema.tables WHERE table_name = %s",
+                    (table,))
+                if result.empty:
+                    logger.error(f"Missing required table: {table}")
+                    return False
+            
+            logger.info("Database connection test passed")
+            return True
+            
         except Exception as e:
             logger.critical(f"Connection test failed: {e}")
             return False
-        
+    
     def repair_database(self):
         """Attempt to repair common database issues"""
         logger.info("Attempting database repair")
-        with self.get_engine().connect() as conn:
-            try:
-                # Ensure all required columns exist
-                conn.execute(text('''
-                DO $$
+        try:
+            self.execute_query('''
+            DO $$
+            BEGIN
                 BEGIN
-                    BEGIN
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'operator';
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions JSONB;
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS last_tab TEXT DEFAULT 'Dashboard';
-                        EXCEPTION WHEN duplicate_column THEN 
-                        RAISE NOTICE 'columns already exist in users';
-                    END;
-                END $$;
-                '''))
+                    ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'operator';
+                    ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions JSONB;
+                    ALTER TABLE users ADD COLUMN IF NOT EXISTS last_tab TEXT DEFAULT 'Dashboard';
+                    EXCEPTION WHEN duplicate_column THEN 
+                    RAISE NOTICE 'columns already exist in users';
+                END;
                 
-                conn.commit()
-                logger.info("Database repair completed")
-                return True
-            except Exception as e:
-                logger.error(f"Repair failed: {e}")
-                conn.rollback()
-                return False
-        
+                -- Ensure user_settings table exists
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    username TEXT PRIMARY KEY REFERENCES users(username),
+                    last_tab TEXT DEFAULT 'Dashboard',
+                    preferences JSONB
+                );
+            END $$;
+            ''')
+            logger.info("Database repair completed")
+            return True
+        except Exception as e:
+            logger.error(f"Repair failed: {e}")
+            return False
+    
     def create_user(self, username, password_hash, role='operator', permissions=None):
         """
         Enhanced user creation with role and permissions validation
@@ -718,271 +731,216 @@ class BeverageQADatabase:
         except (TypeError, ValueError) as e:
             return False, f"Invalid permissions format: {str(e)}"
         
-        with self.get_engine().connect() as conn:
-            try:
-                with conn.begin():  # Transaction block
-                    # Check for existing user
-                    if conn.execute(
-                        text("SELECT 1 FROM users WHERE username = :username"),
-                        {'username': username.strip().lower()}
-                    ).scalar():
-                        return False, "Username already exists"
-                    
-                    # Create new user
-                    result = conn.execute(
-                        text("""
-                        INSERT INTO users (
-                            username, 
-                            password_hash, 
-                            role, 
-                            permissions, 
-                            created_at, 
-                            last_tab
-                        ) VALUES (
-                            :username, 
-                            :password_hash, 
-                            :role, 
-                            :permissions, 
-                            NOW(), 
-                            'Dashboard'
-                        )
-                        RETURNING username, role, created_at
-                        """),
-                        {
-                            'username': username.strip(),
-                            'password_hash': password_hash,
-                            'role': role.lower(),
-                            'permissions': permissions_json
-                        }
-                    )
-                    
-                    # Verify creation
-                    if result.fetchone():
-                        return True, f"User '{username}' created successfully as {role}"
-                    return False, "Failed to create user"
-                    
-            except Exception as e:
-                error_type = e.__class__.__name__
-                error_details = str(e)
+        try:
+            # Check for existing user
+            exists = self.execute_query(
+                "SELECT 1 FROM users WHERE username = %s",
+                (username.strip().lower(),)
+            )
+            if not exists.empty:
+                return False, "Username already exists"
+            
+            # Create new user
+            result = self.execute_query("""
+            INSERT INTO users (
+                username, 
+                password_hash, 
+                role, 
+                permissions, 
+                created_at, 
+                last_tab
+            ) VALUES (
+                %s, %s, %s, %s, NOW(), 'Dashboard'
+            )
+            RETURNING username, role, created_at
+            """, (
+                username.strip(),
+                password_hash,
+                role.lower(),
+                permissions_json
+            ))
+            
+            if not result.empty:
+                # Also create user settings entry
+                self.execute_query("""
+                INSERT INTO user_settings (username) VALUES (%s)
+                ON CONFLICT (username) DO NOTHING
+                """, (username.strip(),))
                 
-                # Handle specific error cases
-                if "permissions" in error_details.lower():
-                    return False, "Invalid permissions format"
-                elif "unique" in error_details.lower():
-                    return False, "Username already exists"
-                elif "connection" in error_details.lower():
-                    return False, "Database connection error"
+                return True, f"User '{username}' created successfully as {role}"
+            return False, "Failed to create user"
                 
-                # Generic error message
-                logger.error(f"User creation failed ({error_type}): {error_details}")
-                return False, f"System error: {error_details}"
-                
+        except Exception as e:
+            error_type = e.__class__.__name__
+            error_details = str(e)
+            
+            # Handle specific error cases
+            if "permissions" in error_details.lower():
+                return False, "Invalid permissions format"
+            elif "unique" in error_details.lower():
+                return False, "Username already exists"
+            elif "connection" in error_details.lower():
+                return False, "Database connection error"
+            
+            # Generic error message
+            logger.error(f"User creation failed ({error_type}): {error_details}")
+            return False, f"System error: {error_details}"
+            
     def get_user(self, username):
         """Get user details with error handling"""
-        with self.get_engine().connect() as conn:
-            try:
-                result = conn.execute(
-                    text("""
-                    SELECT 
-                        username, 
-                        password_hash, 
-                        role, 
-                        COALESCE(permissions, '{}'::jsonb) as permissions,
-                        created_at,
-                        last_login,
-                        last_tab
-                    FROM users 
-                    WHERE username = :username
-                    """),
-                    {'username': username}
-                )
-                user = result.fetchone()
-                
-                if user:
-                    # Convert permissions JSONB to Python dict if it's a string
-                    permissions = user.permissions
-                    if isinstance(permissions, str):
-                        try:
-                            permissions = json.loads(permissions)
-                        except json.JSONDecodeError:
-                            permissions = {}
-                    
-                    return {
-                        'username': user.username,
-                        'password_hash': user.password_hash,
-                        'role': user.role,
-                        'permissions': permissions,
-                        'created_at': user.created_at,
-                        'last_login': user.last_login,
-                        'last_tab': user.last_tab
-                    }
-                return None
-                
-            except Exception as e:
-                st.error(f"Error fetching user: {e}")
-                return None
-            
-    def get_user_last_tab(self, username):
-        """Get the last visited tab for a user from user_settings table"""
         try:
-            # First try the new user_settings table
-            result = self.execute_query(
-                "SELECT last_tab FROM user_settings WHERE username = %s",
-                (username,)
-            )
+            result = self.execute_query("""
+            SELECT 
+                u.username, 
+                u.password_hash, 
+                u.role, 
+                COALESCE(u.permissions, '{}'::jsonb) as permissions,
+                u.created_at,
+                u.last_login,
+                COALESCE(s.last_tab, u.last_tab, 'Dashboard') as last_tab
+            FROM users u
+            LEFT JOIN user_settings s ON u.username = s.username
+            WHERE u.username = %s
+            """, (username,))
             
-            if result:  # Found in user_settings
-                return result[0]['last_tab']
+            if not result.empty:
+                user = result.iloc[0]
+                # Convert permissions JSONB to Python dict
+                permissions = user['permissions']
+                if isinstance(permissions, str):
+                    try:
+                        permissions = json.loads(permissions)
+                    except json.JSONDecodeError:
+                        permissions = {}
                 
-            # Fallback to old users table if not found
-            result = self.execute_query(
-                "SELECT last_tab FROM users WHERE username = %s",
-                (username,)
-            )
+                return {
+                    'username': user['username'],
+                    'password_hash': user['password_hash'],
+                    'role': user['role'],
+                    'permissions': permissions or {},
+                    'created_at': user['created_at'],
+                    'last_login': user['last_login'],
+                    'last_tab': user['last_tab']
+                }
+            return None
             
-            if result:  # Found in users table
-                last_tab = result[0]['last_tab']
-                # Migrate to new table
-                self.update_user_last_tab(username, last_tab)
-                return last_tab
-                
-            return "Dashboard"  # Default if user not found
+        except Exception as e:
+            st.error(f"Error fetching user: {e}")
+            return None
+    
+    def get_user_last_tab(self, username):
+        """Get the last visited tab for a user"""
+        try:
+            result = self.execute_query("""
+            SELECT COALESCE(
+                (SELECT last_tab FROM user_settings WHERE username = %s),
+                (SELECT last_tab FROM users WHERE username = %s),
+                'Dashboard'
+            ) as last_tab
+            """, (username, username))
+            
+            if not result.empty:
+                return result.iloc[0]['last_tab']
+            return "Dashboard"
             
         except Exception as e:
             st.error(f"Error getting last tab: {e}")
             return "Dashboard"
 
     def update_user_last_tab(self, username, tab_name):
-        """Update the last visited tab in user_settings table with UPSERT"""
+        """Update the last visited tab for a user"""
         try:
-            # First ensure the user exists
-            user_exists = self.execute_query(
-                "SELECT 1 FROM users WHERE username = %s",
-                (username,)
+            # Update both user_settings and users tables
+            result = self.execute_query("""
+            WITH updated_user AS (
+                UPDATE users SET last_tab = %s 
+                WHERE username = %s
+                RETURNING 1
             )
+            INSERT INTO user_settings (username, last_tab)
+            VALUES (%s, %s)
+            ON CONFLICT (username) 
+            DO UPDATE SET last_tab = EXCLUDED.last_tab
+            RETURNING 1
+            """, (tab_name, username, username, tab_name))
             
-            if not user_exists:
-                return False
-                
-            # Update or insert into user_settings
-            self.execute_query(
-                """INSERT INTO user_settings (username, last_tab) 
-                VALUES (%s, %s)
-                ON CONFLICT (username) 
-                DO UPDATE SET last_tab = EXCLUDED.last_tab""",
-                (username, tab_name)
-            )
-            
-            # Also update the legacy users table for backward compatibility
-            self.execute_query(
-                "UPDATE users SET last_tab = %s WHERE username = %s",
-                (tab_name, username)
-            )
-            
-            return True
-            
+            return not result.empty
         except Exception as e:
             st.error(f"Error updating last tab: {e}")
             return False
     
     def update_user_role(self, username, new_role):
         """Update a user's role"""
-        with self.get_engine().connect() as conn:
-            try:
-                conn.execute(
-                    text("UPDATE users SET role = :new_role WHERE username = :username"),
-                    {'new_role': new_role, 'username': username}
-                )
-                conn.commit()
-                return True
-            except Exception as e:
-                conn.rollback()
-                st.error(f"Error updating user role: {e}")
-                return False
+        try:
+            result = self.execute_query(
+                "UPDATE users SET role = %s WHERE username = %s RETURNING 1",
+                (new_role, username))
+            return not result.empty
+        except Exception as e:
+            st.error(f"Error updating user role: {e}")
+            return False
 
     def save_shift_handover(self, data):
         """Save shift handover information"""
-        with self.get_engine().connect() as conn:
-            try:
-                conn.execute(text('''
-                INSERT INTO shift_handover (
-                    shift, handover_from, handover_to, timestamp, 
-                    notes, issues, actions
-                ) VALUES (
-                    :shift, :handover_from, :handover_to, :timestamp,
-                    :notes, :issues, :actions
-                )
-                '''), data)
-                conn.commit()
-                return True
-            except Exception as e:
-                conn.rollback()
-                st.error(f"Error saving shift handover: {e}")
-                return False
+        try:
+            result = self.execute_query('''
+            INSERT INTO shift_handover (
+                shift, handover_from, handover_to, timestamp, 
+                notes, issues, actions
+            ) VALUES (
+                %(shift)s, %(handover_from)s, %(handover_to)s, %(timestamp)s,
+                %(notes)s, %(issues)s, %(actions)s
+            )
+            RETURNING 1
+            ''', data)
+            return not result.empty
+        except Exception as e:
+            st.error(f"Error saving shift handover: {e}")
+            return False
 
     def get_shift_handovers(self, limit=5):
         """Get recent shift handovers"""
-        with self.get_engine().connect() as conn:
-            try:
-                result = conn.execute(text("""
-                SELECT * FROM shift_handover
-                ORDER BY timestamp DESC
-                LIMIT :limit
-                """), {'limit': limit})
-                return pd.DataFrame(result.fetchall(), columns=result.keys())
-            except Exception as e:
-                st.error(f"Error retrieving shift handovers: {e}")
-                return pd.DataFrame()
+        try:
+            return self.execute_query("""
+            SELECT * FROM shift_handover
+            ORDER BY timestamp DESC
+            LIMIT %s
+            """, (limit,))
+        except Exception as e:
+            st.error(f"Error retrieving shift handovers: {e}")
+            return pd.DataFrame()
 
     def save_lab_inventory(self, data):
         """Save lab inventory information"""
-        with self.get_engine().connect() as conn:
-            try:
-                conn.execute(text('''
-                INSERT INTO lab_inventory (
-                    item_name, quantity, unit, location,
-                    last_checked, checked_by, notes
-                ) VALUES (
-                    :item_name, :quantity, :unit, :location,
-                    :last_checked, :checked_by, :notes
-                )
-                '''), data)
-                conn.commit()
-                return True
-            except Exception as e:
-                conn.rollback()
-                st.error(f"Error saving lab inventory: {e}")
-                return False
+        try:
+            result = self.execute_query('''
+            INSERT INTO lab_inventory (
+                item_name, quantity, unit, location,
+                last_checked, checked_by, notes
+            ) VALUES (
+                %(item_name)s, %(quantity)s, %(unit)s, %(location)s,
+                %(last_checked)s, %(checked_by)s, %(notes)s
+            )
+            RETURNING 1
+            ''', data)
+            return not result.empty
+        except Exception as e:
+            st.error(f"Error saving lab inventory: {e}")
+            return False
 
     def get_lab_inventory(self):
         """Get all lab inventory items"""
-        with self.get_engine().connect() as conn:
-            try:
-                result = conn.execute(text("""
-                SELECT * FROM lab_inventory
-                ORDER BY item_name
-                """))
-                return pd.DataFrame(result.fetchall(), columns=result.keys())
-            except Exception as e:
-                st.error(f"Error retrieving lab inventory: {e}")
-                return pd.DataFrame()
-            
-    def execute_query(self, query, params=None):
-        """Execute a SQL query and return results as DataFrame"""
         try:
-            with self.connection.cursor() as cursor:
-                cursor.execute(query, params or ())
-                if cursor.description:  # If it's a SELECT query
-                    columns = [col[0] for col in cursor.description]
-                    data = cursor.fetchall()
-                    return pd.DataFrame(data, columns=columns)
-                return pd.DataFrame()
+            return self.execute_query("""
+            SELECT * FROM lab_inventory
+            ORDER BY item_name
+            """)
         except Exception as e:
-            st.error(f"Database query failed: {str(e)}")
+            st.error(f"Error retrieving lab inventory: {e}")
             return pd.DataFrame()
 
 # Singleton instance for the application
-_global_db_instance = None
+_global_db_instance = None 
 
 def get_db():
     """Get the global database instance"""
@@ -995,18 +953,21 @@ def get_conn():
     """Backward compatible connection getter"""
     return get_db().get_engine().connect()
 
-# LEGACY FUNCTIONS (module-level)
 def get_check_data(start_date, end_date, product_filter=None):
     """Get combined check data for visualization or reporting"""
     try:
         db = BeverageQADatabase()
         with st.spinner("Loading data..."):  # Add visual feedback
-            data = db.get_check_data(start_date, end_date, product_filter)
+            data = st.session_state.db.get_check_data(start_date, end_date)
+            if 'product' in data.columns:
+                product_options = ["All"] + list(data['product'].dropna().unique())
+            else:
+                product_options = ["All"]
         return data
     except Exception as e:
         st.error(f"Error loading data: {e}")
         return pd.DataFrame()  # Return empty DataFrame on error
-
+    
 def initialize_database():
     """Initialize the database tables"""
     return BeverageQADatabase()
@@ -1036,12 +997,12 @@ def get_recent_checks(limit=10):
     db = BeverageQADatabase()
     return db.get_recent_checks(limit)
 
-def get_user_checks(username, limit=10):
+def get_user_checks(username, limit=10, include_measurements=False):
     """Get checks for a specific user"""
     db = BeverageQADatabase()
     return db.get_user_checks(username, limit)
 
-def get_public_checks(limit=5):
+def get_public_checks(self, limit=5, include_measurements=False):
     """Get public checks (limited information)"""
     db = BeverageQADatabase()
     return db.get_public_checks(limit)

@@ -382,6 +382,10 @@ def detect_statistical_anomalies(data, parameter, sensitivity=0.9, threshold=3.0
     if data.empty or parameter not in data.columns:
         return pd.DataFrame()
     
+    # Ensure timestamp column is datetime
+    if 'timestamp' in data.columns:
+        data['timestamp'] = pd.to_datetime(data['timestamp'])
+    
     # Filter relevant data
     param_data = data[[parameter, 'timestamp']].dropna()
     if len(param_data) < 5:  # Need enough data points
@@ -507,7 +511,7 @@ def detect_anomalies(hours=24):
     return detected_anomalies
 
 # Function to display anomaly alerts
-def display_anomaly_alerts(status=None, days=7):
+def display_anomaly_alerts(status=None, days=28):
     """
     Display anomaly alerts with action buttons
     

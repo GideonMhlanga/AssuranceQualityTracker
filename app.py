@@ -81,9 +81,7 @@ class FallbackDatabase:
     def get_check_data(self, *args, **kwargs):
         return pd.DataFrame()
     
-    def execute_query(self, query, params=None):
-        """Fallback implementation of execute_query"""
-        st.warning("Using fallback database - query execution not available")
+    def execute_query(self, query):
         return pd.DataFrame()
 
 # =============================================
@@ -179,7 +177,7 @@ with loading_placeholder:
 # =============================================
 # Lazy Loaded Modules (Cached Resources)
 # =============================================
-@st.cache_resource(ttl=3600)
+@st.cache_resource
 def load_database():
     try:
         from database import BeverageQADatabase, get_check_data
@@ -350,7 +348,6 @@ def load_other_modules():
         st.warning(f"Could not load inventory module: {str(e)}")
     
     return modules
-
 # =============================================
 # Modified initialization phase
 # =============================================
@@ -414,6 +411,7 @@ if st.session_state.init_phase == 'failed':
         st.session_state.clear()
         st.session_state.needs_rerun = True
     st.stop()
+
 
 # =============================================
 # Helper Functions
@@ -485,15 +483,23 @@ def show_dashboard():
     
     st.title("Quality Assurance Dashboard")
     
-    @st.cache_data(ttl=300)
+    @st.cache_data
     def get_recent_checks():
         try:
             if check_permission('view', 'all_data'):
-                return st.session_state.db.get_recent_checks(10)
+                checks = st.session_state.db.get_recent_checks(10, include_measurements=True)
             elif check_permission('edit', 'own_data'):
-                return st.session_state.db.get_user_checks(st.session_state.username, 10)
+                checks = st.session_state.db.get_user_checks(st.session_state.username, 10, include_measurements=True)
             else:
-                return st.session_state.db.get_public_checks(5)
+                checks = st.session_state.db.get_public_checks(5, include_measurements=True)
+
+            # Ensure timestamp column exists and is datetime
+            if not checks.empty and 'timestamp' in checks.columns:
+                checks['timestamp'] = pd.to_datetime(checks['timestamp'], errors='coerce')
+                # Drop rows where timestamp conversion failed
+                checks = checks.dropna(subset=['timestamp'])
+            
+            return checks
         except Exception as e:
             st.error(f"Failed to load checks: {str(e)}")
             return pd.DataFrame()
@@ -519,16 +525,22 @@ def show_dashboard():
         
         col1, col2, col3 = st.columns(3)
         with col1:
-            today_checks = len(recent_checks[recent_checks['timestamp'].dt.date == dt.datetime.now().date()]) if 'timestamp' in recent_checks.columns else 0
-            st.metric("Total Checks Today", today_checks)
+            today_checks = 0
+            if not recent_checks.empty and 'timestamp' in recent_checks.columns:
+                today_checks = len(recent_checks[recent_checks['timestamp'].dt.date == dt.datetime.now().date()]) if 'timestamp' in recent_checks.columns else 0
+                st.metric("Total Checks Today", today_checks)
         
         with col2:
-            st.metric("Active Inspectors", recent_checks['username'].nunique() if 'username' in recent_checks.columns else 0)
+            unique_inspectors = 0
+            if not recent_checks.empty and 'username' in recent_checks.columns:
+                unique_inspectors = recent_checks['username'].nunique()
+            st.metric("Active Inspectors", unique_inspectors)
         
         with col3:
             pass_rate = 100
-            if 'tamper_evidence' in recent_checks.columns:
-                pass_rate = int(100 * recent_checks['tamper_evidence'].str.contains('PASS').sum() / len(recent_checks))
+            if not recent_checks.empty and 'tamper_evidence' in recent_checks.columns:
+                pass_count = recent_checks['tamper_evidence'].str.contains('PASS').sum()
+                pass_rate = int(100 * pass_count / len(recent_checks)) if len(recent_checks) > 0 else 100
             st.metric("Tamper Evidence Pass Rate", f"{pass_rate}%")
         
         if st.session_state.viz_modules[0] and check_permission('view', 'all_data'):
@@ -536,14 +548,23 @@ def show_dashboard():
             tab1, tab2 = st.tabs(["BRIX Trends", "Torque Performance"])
             
             with tab1:
-                fig = st.session_state.viz_modules[0](recent_checks, height=400)
-                if fig and check_permission('export'):
-                    export_as_png(fig, "brix_trends.png")
-            
+                brix_cols = [col for col in recent_checks.columns if 'brix' in col.lower()]
+                if brix_cols:
+                    fig = st.session_state.viz_modules[0](recent_checks, height=400)
+                    if fig and check_permission('export'):
+                        export_as_png(fig, "brix_trends.png")
+                    else:
+                        st.warning("No BRIX data available in recent checks")
+                
             with tab2:
-                fig = st.session_state.viz_modules[1](recent_checks, height=400)
-                if fig and check_permission('export'):
-                    export_as_png(fig, "torque_performance.png")
+                # Check if we have Torque data columns
+                torque_cols = [col for col in recent_checks.columns if 'torque' in col.lower()]
+                if torque_cols:
+                    fig = st.session_state.viz_modules[1](recent_checks, height=400)
+                    if fig and check_permission('export'):
+                        export_as_png(fig, "torque_performance.png")
+                    else:
+                        st.warning("No Torque data available in recent checks")
 
 @require_role("admin", "supervisor", "operator")
 def show_data_entry():
@@ -562,49 +583,57 @@ def show_data_entry():
     if 'start_time' not in st.session_state or not st.session_state.start_time:
         st.session_state.start_time = dt.datetime.now()
     
-    form_type = st.radio(
-        "Select Form Type",
-        ["Torque & Tamper", "Net Content", "30-Min Quality Check"],
-        horizontal=True
-    )
+     # Initialize form tracking in session state
+    if 'current_form' not in st.session_state:
+        st.session_state.current_form = "Torque & Tamper"
+    
+    # Create tabs with proper Streamlit syntax
+    tab1, tab2, tab3 = st.tabs(["Torque & Tamper", "Net Content", "30-Min Quality Check"])
     
     # Get required parameters from session state
     username = st.session_state.get('username')
     start_time = st.session_state.get('start_time')
     check_id = st.session_state.get('check_id')
     
-    # Debug output to verify values
-    st.write(f"Debug - Username: {username}, Start Time: {start_time}, Check ID: {check_id}")
+    # Handle each tab's content
+    with tab1:
+        st.session_state.current_form = "Torque & Tamper"
+        if st.session_state.form_modules[0]:
+            try:
+                st.session_state.form_modules[0](
+                    username=username,
+                    start_time=start_time,
+                    check_id=check_id
+                )
+            except Exception as e:
+                st.error(f"Error displaying torque form: {str(e)}")
+                st.error("Please try again or contact support if the problem persists")
     
-    if form_type == "Torque & Tamper" and st.session_state.form_modules[0]:
-        try:
-            st.session_state.form_modules[0](
-                username=username,
-                start_time=start_time,
-                check_id=check_id
-            )
-        except Exception as e:
-            st.error(f"Error displaying torque form: {str(e)}")
-    elif form_type == "Net Content" and st.session_state.form_modules[1]:
-        try:
-            st.session_state.form_modules[1](
-                username=username,
-                start_time=start_time,
-                check_id=check_id
-            )
-        except Exception as e:
-            st.error(f"Error displaying net content form: {str(e)}")
-    elif form_type == "30-Min Quality Check" and st.session_state.form_modules[2]:
-        try:
-            st.session_state.form_modules[2](
-                username=username,
-                start_time=start_time,
-                check_id=check_id
-            )
-        except Exception as e:
-            st.error(f"Error displaying quality check form: {str(e)}")
-    else:
-        st.error("Form modules not loaded properly")
+    with tab2:
+        st.session_state.current_form = "Net Content"
+        if st.session_state.form_modules[1]:
+            try:
+                st.session_state.form_modules[1](
+                    username=username,
+                    start_time=start_time,
+                    check_id=check_id
+                )
+            except Exception as e:
+                st.error(f"Error displaying net content form: {str(e)}")
+                st.error("Please try again or contact support if the problem persists")
+    
+    with tab3:
+        st.session_state.current_form = "30-Min Quality Check"
+        if st.session_state.form_modules[2]:
+            try:
+                st.session_state.form_modules[2](
+                    username=username,
+                    start_time=start_time,
+                    check_id=check_id
+                )
+            except Exception as e:
+                st.error(f"Error displaying quality check form: {str(e)}")
+                st.error("Please try again or contact support if the problem persists")
 
 @require_role("admin", "supervisor", "operator", "viewer")
 def show_visualizations():
@@ -618,7 +647,7 @@ def show_visualizations():
     # Date range selector
     col1, col2 = st.columns(2)
     with col1:
-        start_date = st.date_input("Start Date", dt.date.today() - dt.timedelta(days=7))
+        start_date = st.date_input("Start Date", dt.date.today() - dt.timedelta(days=21))
     with col2:
         end_date = st.date_input("End Date", dt.date.today())
     
@@ -626,11 +655,22 @@ def show_visualizations():
         st.error("End date must be after start date")
         return
     
-    # Product filter
-    product_options = ["All"] + list(st.session_state.db.get_check_data(
-        start_date, end_date
-    )['product'].dropna().unique())
+    # Initialize product options with "All" as default
+    product_options = ["All"]
+
+    try:
+        # Get check data for product filter
+        check_data = st.session_state.db.get_check_data(start_date, end_date)
+        
+        # Check if data exists and has product column
+        if not check_data.empty and 'product' in check_data.columns:
+            product_options += list(check_data['product'].dropna().unique())
+        else:
+            st.warning("No product data available for filtering")
+    except Exception as e:
+        st.error(f"Error loading product data: {str(e)}")
     
+    # Product filter
     selected_products = st.multiselect(
         "Filter by Product (optional)",
         product_options,
@@ -638,51 +678,55 @@ def show_visualizations():
     )
     
     # Load data with appropriate permissions
-    with st.spinner("Loading data..."):
-        if check_permission('view', 'all_data'):
-            data = st.session_state.get_check_data(
-                start_date,
-                end_date,
-                selected_products if "All" not in selected_products else None
-            )
-        elif check_permission('edit', 'own_data'):
-            data = st.session_state.db.get_user_checks(
-                st.session_state.username,
-                start_date=start_date,
-                end_date=end_date,
-                products=selected_products if "All" not in selected_products else None
-            )
-        else:
-            data = st.session_state.db.get_public_checks(
-                start_date=start_date,
-                end_date=end_date,
-                products=selected_products if "All" not in selected_products else None
-            )
+    try:
+        with st.spinner("Loading data..."):
+            if check_permission('view', 'all_data'):
+                data = st.session_state.get_check_data(
+                    start_date,
+                    end_date,
+                    selected_products if "All" not in selected_products else None
+                )
+            elif check_permission('edit', 'own_data'):
+                data = st.session_state.db.get_user_checks(
+                    st.session_state.username,
+                    start_date=start_date,
+                    end_date=end_date,
+                    products=selected_products if "All" not in selected_products else None
+                )
+            else:
+                data = st.session_state.db.get_public_checks(
+                    start_date=start_date,
+                    end_date=end_date,
+                    products=selected_products if "All" not in selected_products else None
+                )
     
-    if data.empty:
-        st.info("No data found for selected filters")
-        return
-    
-    # Visualization tabs
-    tab1, tab2, tab3 = st.tabs(["BRIX Analysis", "Torque Analysis", "Quality Metrics"])
-    
-    with tab1:
-        if st.session_state.viz_modules[0]:
-            fig = st.session_state.viz_modules[0](data, height=500)
-            if fig and check_permission('export'):
-                export_as_png(fig, "brix_analysis.png")
-    
-    with tab2:
-        if st.session_state.viz_modules[1]:
-            fig = st.session_state.viz_modules[1](data, height=500)
-            if fig and check_permission('export'):
-                export_as_png(fig, "torque_analysis.png")
-    
-    with tab3:
-        if st.session_state.viz_modules[2]:
-            fig = st.session_state.viz_modules[2](data, height=500)
-            if fig and check_permission('export'):
-                export_as_png(fig, "quality_metrics.png")
+        if data.empty:
+            st.info("No data found for selected filters")
+            return
+        
+        # Visualization tabs
+        tab1, tab2, tab3 = st.tabs(["BRIX Analysis", "Torque Analysis", "Quality Metrics"])
+        
+        with tab1:
+            if st.session_state.viz_modules[0]:
+                fig = st.session_state.viz_modules[0](data, height=500)
+                if fig and check_permission('export'):
+                    export_as_png(fig, "brix_analysis.png")
+        
+        with tab2:
+            if st.session_state.viz_modules[1]:
+                fig = st.session_state.viz_modules[1](data, height=500)
+                if fig and check_permission('export'):
+                    export_as_png(fig, "torque_analysis.png")
+        
+        with tab3:
+            if st.session_state.viz_modules[2]:
+                fig = st.session_state.viz_modules[2](data)
+                if fig and check_permission('export'):
+                    export_as_png(fig, "quality_metrics.png")
+
+    except Exception as e:
+        st.error(f"Error loading visualization data: {str(e)}")
 
 @require_role("admin", "supervisor", "operator")
 def show_reports():
@@ -696,7 +740,7 @@ def show_reports():
     # Date range selector
     col1, col2 = st.columns(2)
     with col1:
-        start_date = st.date_input("Report Start Date", dt.date.today() - dt.timedelta(days=7))
+        start_date = st.date_input("Report Start Date", dt.date.today() - dt.timedelta(days=28))
     with col2:
         end_date = st.date_input("Report End Date", dt.date.today())
     
@@ -720,36 +764,217 @@ def show_reports():
         with st.spinner(f"Generating {report_type} report..."):
             try:
                 if check_permission('view', 'all_data'):
-                    report_data = st.session_state.get_check_data(start_date, end_date)
+                    raw_data = st.session_state.get_check_data(start_date, end_date)
                 elif check_permission('edit', 'own_data'):
-                    report_data = st.session_state.db.get_user_checks(
+                    raw_data = st.session_state.db.get_user_checks(
                         st.session_state.username,
                         start_date=start_date,
                         end_date=end_date
                     )
                 else:
-                    report_data = st.session_state.db.get_public_checks(
+                    raw_data = st.session_state.db.get_public_checks(
                         start_date=start_date,
                         end_date=end_date
                     )
                 
-                if report_data.empty:
+                if raw_data.empty:
                     st.warning("No data found for selected date range")
                     return
                 
-                report = st.session_state.report_modules[0](
-                    report_data, 
-                    report_type,
+                # Transform the raw data into report format
+                report_data = transform_data_for_report(raw_data, report_type)
+
+                # Call with explicit keyword arguments
+                report_path = st.session_state.report_modules[0](
+                    report_data=report_data,
+                    report_type=report_type,
                     start_date=start_date,
                     end_date=end_date,
                     comments=report_comment
                 )
-                
-                if report:
+
+                if report_path:     #Check if report was generated successfully              
                     st.success("Report generated successfully")
-                    st.session_state.report_modules[1](report, f"{report_type}_{start_date}_to_{end_date}.pdf")
+                    st.session_state.report_modules[1](report_data, f"{report_type}_{start_date}_to_{end_date}")
+                else:
+                    st.error("Failed to generate report")
+
             except Exception as e:
                 st.error(f"Error generating report: {str(e)}")
+
+def transform_data_for_report(raw_data, report_type):
+    """
+    Transform raw check data into report format with sections based on report type
+    """
+    report_sections = []
+    
+    # Common summary section for all report types
+    summary_metrics = [
+        ('Total Checks', len(raw_data)),
+        ('Unique Products', raw_data['product'].nunique()),
+        ('Unique Inspectors', raw_data['username'].nunique())
+    ]
+
+    # First convert known numeric columns
+    numeric_cols = []
+    for col in raw_data.columns:
+        if any(keyword in col.lower() for keyword in ["brix", "torque", "temp", "pressure", "weight", "volume"]):
+            numeric_cols.append(col)
+            raw_data[col] = pd.to_numeric(raw_data[col], errors="coerce")
+
+    # Then clean other object columns that might contain numeric data
+    for col in raw_data.select_dtypes(include=['object']).columns:
+        if col not in ["product", "username", "tamper_evidence", "timestamp", "check_id", "check_type"]:
+            try:
+                # Try direct conversion first
+                raw_data[col] = pd.to_numeric(raw_data[col], errors="coerce")
+                # If that fails, try cleaning strings
+                if raw_data[col].isna().any():
+                    raw_data[col] = pd.to_numeric(
+                        raw_data[col].astype(str).str.replace(r"[^\d\.-]", "", regex=True),
+                        errors="coerce"
+                    )
+                numeric_cols.append(col)
+            except:
+                pass
+    
+    if report_type == "Daily Summary":
+        # Group by date for daily summaries
+        raw_data['date'] = pd.to_datetime(raw_data['timestamp']).dt.date
+        daily_stats = raw_data.groupby('date').agg({
+            'check_id': 'count',
+            'product': 'nunique',
+            'username': 'nunique'
+        }).rename(columns={
+            'check_id': 'Checks',
+            'product': 'Products',
+            'username': 'Inspectors'
+        })
+        
+        for date, row in daily_stats.iterrows():
+            report_sections.append({
+                'Report Section': 'Daily Summary',
+                'Date': str(date),
+                'Checks': str(row['Checks']),
+                'Products': str(row['Products']),
+                'Inspectors': str(row['Inspectors'])
+            })
+            
+    elif report_type == "Shift Summary":
+        # Extract shift information (assuming timestamps are available)
+        raw_data['date'] = pd.to_datetime(raw_data['timestamp']).dt.date
+        raw_data['hour'] = pd.to_datetime(raw_data['timestamp']).dt.hour
+        raw_data['shift'] = raw_data['hour'].apply(
+            lambda x: 'Morning' if 6 <= x < 14 else 
+                     'Afternoon' if 14 <= x < 22 else 
+                     'Night'
+        )
+        
+        shift_stats = raw_data.groupby(['date', 'shift']).agg({
+            'check_id': 'count',
+            'product': 'nunique'
+        }).rename(columns={
+            'check_id': 'Checks',
+            'product': 'Products'
+        })
+        
+        for (date, shift), row in shift_stats.iterrows():
+            report_sections.append({
+                'Report Section': 'Shift Summary',
+                'Date': str(date),
+                'Shift': shift,
+                'Checks': str(row['Checks']),
+                'Products': str(row['Products'])
+            })
+            
+    elif report_type == "Product Analysis":
+        # Detailed product-level analysis
+        product_stats = raw_data.groupby('product').agg({
+            'check_id': 'count',
+            'username': 'nunique'
+        }).rename(columns={
+            'check_id': 'Checks',
+            'username': 'Inspectors'
+        })
+        
+        # Add quality metrics if available
+        if 'tamper_evidence' in raw_data.columns:
+            product_stats['Pass Rate'] = (
+                raw_data.groupby('product')['tamper_evidence']
+                .apply(lambda x: (x == 'PASS').mean() * 100).round(1))
+        
+        # Add numeric metrics for each product
+        for num_col in numeric_cols:
+            if num_col in raw_data.columns:
+                product_stats[f'{num_col}_avg'] = raw_data.groupby('product')[num_col].mean().round(2)
+                product_stats[f'{num_col}_std'] = raw_data.groupby('product')[num_col].std().round(2)
+        
+        for product, row in product_stats.iterrows():
+            section = {
+                'Report Section': 'Product Analysis',
+                'Product': product,
+                'Checks': str(row['Checks']),
+                'Inspectors': str(row['Inspectors'])
+            }
+            if 'Pass Rate' in row:
+                section['Pass Rate'] = f"{row['Pass Rate']}%"
+            
+            # Add numeric metrics
+            for num_col in numeric_cols:
+                if f'{num_col}_avg' in row:
+                    section[f'{num_col} (Avg)'] = f"{row[f'{num_col}_avg']}"
+                if f'{num_col}_std' in row:
+                    section[f'{num_col} (Std Dev)'] = f"{row[f'{num_col}_std']}"
+            
+            report_sections.append(section)
+            
+    elif report_type == "Full Quality Report":
+        # Comprehensive report with all metrics
+        report_sections.extend([
+            {'Report Section': 'Summary', 'Metric': metric, 'Value': str(value)}
+            for metric, value in summary_metrics
+        ])
+        
+        # Add statistics for all numeric columns
+        for num_col in numeric_cols:
+            if num_col in raw_data.columns:
+                num_data = raw_data[num_col].dropna()
+                if not num_data.empty:
+                    report_sections.extend([
+                        {'Report Section': f'{num_col} Statistics', 'Metric': 'Average', 'Value': f"{num_data.mean():.2f}"},
+                        {'Report Section': f'{num_col} Statistics', 'Metric': 'Minimum', 'Value': f"{num_data.min():.2f}"},
+                        {'Report Section': f'{num_col} Statistics', 'Metric': 'Maximum', 'Value': f"{num_data.max():.2f}"},
+                        {'Report Section': f'{num_col} Statistics', 'Metric': 'Std Dev', 'Value': f"{num_data.std():.2f}"},
+                        {'Report Section': f'{num_col} Statistics', 'Metric': 'CPK', 'Value': f"{(num_data.mean() - num_data.min()) / (3 * num_data.std()):.2f}" if num_data.std() > 0 else "N/A"}
+                    ])
+        
+        # Add pass/fail statistics if available
+        if 'tamper_evidence' in raw_data.columns:
+            pass_fail = raw_data['tamper_evidence'].value_counts(normalize=True) * 100
+            for status, percent in pass_fail.items():
+                report_sections.append({
+                    'Report Section': 'Quality Results',
+                    'Status': status,
+                    'Percentage': f"{percent:.1f}%"
+                })
+    
+    # Convert to DataFrame and clean up
+    report_df = pd.DataFrame(report_sections)
+    
+    if not report_df.empty:
+        # Master schema: union of all possible fields
+        master_columns = [
+            "Report Section", "Date", "Shift", "Product",
+            "Checks", "Products", "Inspectors", "Pass Rate",
+            "Metric", "Value", "Status", "Percentage"
+        ]
+        # Add all numeric columns to master columns
+        for num_col in numeric_cols:
+            master_columns.extend([f"{num_col} (Avg)", f"{num_col} (Std Dev)"])
+        
+        report_df = report_df.reindex(columns=master_columns, fill_value="")
+    
+    return report_df
 
 @require_role("admin")
 def show_user_management():

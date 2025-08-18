@@ -13,6 +13,12 @@ def display_brix_visualization(data, height=600):
         data: DataFrame with check data
         height: Height of the plot
     """
+    
+     # Ensure timestamp is datetime type and sort
+    data = data.copy()
+    data['timestamp'] = pd.to_datetime(data['timestamp'])
+    data = data.sort_values('timestamp')
+
     # Filter data that has BRIX values
     brix_data = None
     
@@ -60,7 +66,11 @@ def display_brix_visualization(data, height=600):
     fig.update_layout(
         height=height,
         hovermode='x unified',
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+        xaxis=dict(
+            type='date',  # Ensure proper datetime handling
+            tickformat='%Y-%m-%d %H:%M'  # Format timestamp display
+        )
     )
     
     st.plotly_chart(fig, use_container_width=True)
@@ -91,16 +101,42 @@ def display_torque_visualization(data, height=600):
         data: DataFrame with check data
         height: Height of the plot
     """
+    # First filter for torque data if source column exists
+    if 'source' in data.columns:
+        data = data[data['source'] == 'torque_tamper'].copy()
+
+    # Ensure timestamp is datetime type and sort
+    data['timestamp'] = pd.to_datetime(data['timestamp'])
+    data = data.sort_values('timestamp', ascending=False)
+
+    # Debug output to verify data
+    st.write("Full Torque Data Available:", data.shape[0], "records")
+    if not data.empty:
+        st.write("Date Range:", 
+                 data['timestamp'].min().strftime('%Y-%m-%d %H:%M'), 
+                 "to", 
+                 data['timestamp'].max().strftime('%Y-%m-%d %H:%M'))
+
     # Filter to get torque data
     torque_cols = ['head1_torque', 'head2_torque', 'head3_torque', 'head4_torque', 'head5_torque']
     
-    # Check if any torque columns exist in the data
-    if not any(col in data.columns for col in torque_cols):
-        st.info("No torque data available for visualization.")
+     # Check if any torque columns exist in the data
+    available_torque_cols = [col for col in torque_cols if col in data.columns]
+
+    st.write("Available Torque Columns:", available_torque_cols)
+
+    if not available_torque_cols:
+        st.info("No torque data columns found in the data.")
         return
     
-    torque_data = data[['timestamp'] + [col for col in torque_cols if col in data.columns]]
-    torque_data = torque_data.dropna(subset=[col for col in torque_cols if col in data.columns], how='all')
+    # Create filtered dataset with just torque values and timestamp
+    torque_data = data[['timestamp'] + available_torque_cols].copy()
+
+    # Remove rows where all torque values are NaN
+    torque_data = torque_data.dropna(subset=available_torque_cols, how='all')
+    
+    st.write("Filtered Torque Data (all records):")
+    st.dataframe(torque_data)  # Shows the complete DataFrame
     
     if torque_data.empty:
         st.info("No torque data available for visualization.")
@@ -116,7 +152,7 @@ def display_torque_visualization(data, height=600):
     )
     
     # Plot 1: Line chart of torque values over time for each head
-    for i, head_col in enumerate([col for col in torque_cols if col in torque_data.columns]):
+    for head_col in available_torque_cols:
         head_num = int(head_col.split('_')[0][4:])
         fig.add_trace(
             go.Scatter(
