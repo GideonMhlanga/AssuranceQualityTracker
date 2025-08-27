@@ -208,7 +208,7 @@ def require_role(*required_roles):
         return wrapper
     return decorator
 
-def show_login_form(form_key=f"login_form_{time.time()}"):
+def show_login_form():
     """Display login form with registration option and emergency admin creation"""
     # Temporary admin creation (remove after first admin exists)
     try:
@@ -270,7 +270,7 @@ def show_login_form(form_key=f"login_form_{time.time()}"):
                 return authenticate_user(username, password)
     
     with tab2:
-        with st.form("register_form"):
+        with st.form("registration form"):
             st.subheader("New User Registration")
             new_username = st.text_input("New Username", help="Must be 3-20 characters, letters and numbers only")
             new_password = st.text_input("New Password", type="password", 
