@@ -9,3 +9,4 @@ statsmodels>=0.14.4
 streamlit>=1.46.1
 xlsxwriter>=3.2.5
 python-docx>=1.2.0
+matplotlib>=3.10.5
