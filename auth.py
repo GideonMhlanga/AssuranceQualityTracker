@@ -208,7 +208,7 @@ def require_role(*required_roles):
         return wrapper
     return decorator
 
-def show_login_form():
+def show_login_form(form_key=f"login_form_{time.time()}"):
     """Display login form with registration option and emergency admin creation"""
     # Temporary admin creation (remove after first admin exists)
     try:

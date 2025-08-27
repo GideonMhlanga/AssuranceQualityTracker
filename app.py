@@ -1188,7 +1188,7 @@ def show_auth_page():
         initialize_session()
     
     # Simply call the show_login_form function from auth.py
-    if show_login_form():  # This handles both login and registration
+    if show_login_form(form_key=f"login_form_{time.time()}"):  # This handles both login and registration
         st.session_state.show_login_page = False
         st.session_state.needs_rerun = True
                                  

@@ -783,7 +783,8 @@ def display_compliance_report_page(edit_mode=False):
     with col1:
         report_period = st.selectbox(
             "Report Period",
-            ["Last Month", "Last Quarter", "Last Year", "Custom Period"]
+            ["Last Month", "Last Quarter", "Last Year", "Custom Period"],
+            key="report_period_select"
         )
     
     with col2:
@@ -810,7 +811,8 @@ def display_compliance_report_page(edit_mode=False):
     product_filter = st.multiselect(
         "Filter by Product",
         ["All", "Blackberry", "Raspberry", "Cream Soda", "Mazoe Orange Crush", "Bonaqua Water", "Schweppes Still Water"],
-        default=["All"]
+        default=["All"],
+        key="compliance_product_filter"
     )
     
     # Report number
