@@ -14,7 +14,8 @@ from auth import (
     get_current_user, 
     require_role, 
     hash_password,
-    show_login_form
+    show_login_form, 
+    initialize_session
 )
 
 # =============================================
@@ -34,7 +35,8 @@ required_keys = {
     'page_loaded': False,
     'last_tab': 'Dashboard',
     'init_phase': 'starting',
-    'needs_rerun': False
+    'needs_rerun': False,
+    'show_login_page':True
 }
 
 for key, default_value in required_keys.items():
@@ -62,15 +64,20 @@ config.set_option('server.fileWatcherType', 'none')
 # Fallback Classes
 # =============================================
 class FallbackDatabase:
-    def get_recent_checks(self, limit):
+    def get_recent_checks(self, limit, include_measurements=False):
         st.warning("Using fallback database - no real data available")
-        return pd.DataFrame(columns=['check_id', 'check_type', 'timestamp', 'username', 'trade_name', 'product'])
+        # Return a DataFrame with expected columns
+        columns = ['check_id', 'check_type', 'timestamp', 'username', 'trade_name', 'product']
+        if include_measurements:
+            # Add measurement columns if requested
+            columns.extend(['brix', 'torque', 'tamper_evidence', 'net_content'])
+        return pd.DataFrame(columns=columns)
     
-    def get_user_checks(self, username, limit):
-        return self.get_recent_checks(limit)
+    def get_user_checks(self, username, limit, include_measurements=False):
+        return self.get_recent_checks(limit, include_measurements)
     
-    def get_public_checks(self, limit):
-        return self.get_recent_checks(limit)
+    def get_public_checks(self, limit, include_measurements=False):
+        return self.get_recent_checks(limit, include_measurements)
     
     def update_user_last_tab(self, username, tab):
         pass
@@ -146,7 +153,7 @@ ROLE_PERMISSIONS = {
         }
     },
     'guest': {
-        'pages': ["Dashboard"],
+        'pages': ["Dashboard", "Visualizations"],
         'permissions': {
             'view_public_data': True,
             'edit_data': False,
@@ -164,7 +171,7 @@ st.set_page_config(
     page_title="Beverage QA Tracker",
     page_icon="🧪",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 APP_START_TIME = time.time()
@@ -422,13 +429,16 @@ def export_as_png(fig, filename):
     fig.savefig(buf, format="png", dpi=300)
     buf.seek(0)
     plt.close(fig)
+
+    # Add a unique key using the filename and current timestamp
+    unique_key = f"export_{filename}_{time.time()}"
     
     st.download_button(
         label="Download as PNG",
         data=buf,
         file_name=filename,
         mime="image/png",
-        key=f"export_{filename}"
+        key=unique_key
     )
 
 def check_system_health():
@@ -470,6 +480,75 @@ def generate_check_id():
     """Generate a unique check ID for new quality checks"""
     return f"CHK-{dt.datetime.now().strftime('%Y%m%d%H%M%S')}-{st.session_state.username[:3].upper()}"
 
+def show_process_capability():
+    if 'display_capability_page' not in st.session_state.app_modules:
+        st.error("Process Capability module not available")
+        return
+    
+    # Date range selector for capability analysis
+    st.sidebar.subheader("Date Range for Analysis")
+    today = dt.date.today()
+    start_date = st.sidebar.date_input(
+        "Start Date", 
+        today - dt.timedelta(days=30),
+        max_value=today
+    )
+    end_date = st.sidebar.date_input(
+        "End Date", 
+        today,
+        min_value=start_date,
+        max_value=today
+    )
+    
+    # Load data with appropriate permissions
+    with st.spinner(f"Loading data from {start_date} to {end_date}..."):
+        try:
+            if check_permission('view', 'all_data'):
+                data = st.session_state.get_check_data(start_date, end_date)
+            elif check_permission('edit', 'own_data'):
+                data = st.session_state.db.get_user_checks(
+                    st.session_state.username,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+            else:
+                data = st.session_state.db.get_public_checks(
+                    start_date=start_date,
+                    end_date=end_date
+                )
+            
+            if data.empty:
+                st.warning(f"No data available between {start_date} and {end_date}")
+                return
+            
+            # Determine edit mode
+            edit_mode = check_permission('edit', 'all_data') or check_permission('edit', 'own_data')
+            st.session_state.app_modules['display_capability_page'](
+                data=data,
+                edit_mode=edit_mode
+            )
+        except Exception as e:
+            st.error(f"Error loading data: {str(e)}")
+
+def show_shift_handover():
+    if 'display_shift_handover_page' not in st.session_state.app_modules:
+        st.error("Shift Handover module not available")
+        return
+    
+    edit_mode = check_permission('edit', 'all_data') or check_permission('edit', 'own_data')
+    st.session_state.app_modules['display_shift_handover_page'](edit_mode=edit_mode)
+
+def show_lab_inventory():
+    if 'display_lab_inventory_page' not in st.session_state.app_modules:
+        st.error("Lab Inventory module not available")
+        return
+    
+    edit_mode = check_permission('edit', 'all_data') or check_permission('edit', 'own_data')
+    comment_mode = check_permission('comment')
+    st.session_state.app_modules['display_lab_inventory_page'](
+        edit_mode=edit_mode,
+        comment_mode=comment_mode
+    )
 # =============================================
 # Page Components with RBAC
 # =============================================
@@ -647,9 +726,9 @@ def show_visualizations():
     # Date range selector
     col1, col2 = st.columns(2)
     with col1:
-        start_date = st.date_input("Start Date", dt.date.today() - dt.timedelta(days=21))
+        start_date = st.date_input("Start Date", dt.date.today() - dt.timedelta(days=21), key="viz_start_date")
     with col2:
-        end_date = st.date_input("End Date", dt.date.today())
+        end_date = st.date_input("End Date", dt.date.today(), key="viz_end_date")
     
     if start_date > end_date:
         st.error("End date must be after start date")
@@ -674,7 +753,8 @@ def show_visualizations():
     selected_products = st.multiselect(
         "Filter by Product (optional)",
         product_options,
-        default="All"
+        default="All",
+        key="product_filter"
     )
     
     # Load data with appropriate permissions
@@ -751,7 +831,8 @@ def show_reports():
     # Report type selector
     report_type = st.selectbox(
         "Report Type",
-        ["Daily Summary", "Shift Summary", "Product Analysis", "Full Quality Report"]
+        ["Daily Summary", "Shift Summary", "Product Analysis", "Full Quality Report"],
+        key="report_type_selector"          #Add unique key
     )
     
     # Comment field for reports
@@ -760,7 +841,7 @@ def show_reports():
         report_comment = st.text_area("Add comments to report")
     
     # Generate report
-    if st.button("Generate Report"):
+    if st.button("Generate Report", key=f"generate_report_{time.time()}"):
         with st.spinner(f"Generating {report_type} report..."):
             try:
                 if check_permission('view', 'all_data'):
@@ -1096,82 +1177,100 @@ def show_user_management():
                     st.error(f"Error creating user: {str(e)}")
 
 # =============================================
-# Navigation & Main Layout
+# Authentication Page
 # =============================================
-with st.sidebar:
-    if not st.session_state.get('authenticated'):
-        st.title("Welcome, Guest")
-        if show_login_form():
-            st.session_state.needs_rerun = True
-    else:
-        st.title(f"Welcome, {st.session_state.username}")
-        st.caption(f"Role: {st.session_state.role.capitalize()}")
+def show_auth_page():
+    """Show authentication interface using auth.py components"""
+    st.title("Beverage QA Tracker Authentication")
+    
+    # Initialize session if needed
+    if 'authenticated' not in st.session_state:
+        initialize_session()
+    
+    # Simply call the show_login_form function from auth.py
+    if show_login_form():  # This handles both login and registration
+        st.session_state.show_login_page = False
+        st.session_state.needs_rerun = True
+                                 
+# =============================================
+# Main Application Layout
+# =============================================
+def show_main_app():
+        """Show the main application with top navigation"""
+        # User info in top right corner
+        user_col, empty_col = st.columns([1, 5])
+        with user_col:
+            if st.session_state.authenticated:
+                st.markdown(f"""
+                    <div style="text-align: right; margin-bottom: 20px;">
+                        <strong>{st.session_state.username}</strong> ({st.session_state.role})  
+                        <a href="#" onclick="window.location.href='?logout=true'; return false;" style="color: #ff4b4b; text-decoration: none;">Logout</a>
+                    </div>
+                """, unsafe_allow_html=True)
         
-        if st.button("Logout"):
-            logout()
-            st.session_state.needs_rerun = True
-    
-    # System status indicator
-    if not check_system_health():
-        st.error("⚠️ System initialization incomplete")
-    elif isinstance(st.session_state.get('db'), FallbackDatabase):
-        st.warning("⚠️ Using fallback database")
-    
-    # Get allowed pages based on role
-    allowed_pages = get_allowed_pages()
-    tab_options = [
-        "Dashboard", "Data Entry", "Visualizations", "SPC Analysis", 
-        "Process Capability", "Trend Prediction", "Anomaly Detection",
-        "Shift Handover", "Lab Inventory", "Reports", "Compliance Reports",
-        "User Management"
-    ]
-    filtered_tabs = [tab for tab in tab_options if tab in allowed_pages]
-    
-    if filtered_tabs:
-        app_mode = st.selectbox(
-            "Navigation",
-            filtered_tabs,
-            index=filtered_tabs.index(st.session_state.last_tab) if st.session_state.last_tab in filtered_tabs else 0
-        )
+        # Get allowed pages based on role
+        allowed_pages = get_allowed_pages()
+        tab_options = [
+            "Dashboard", "Data Entry", "Visualizations", "SPC Analysis", 
+            "Process Capability", "Trend Prediction", "Anomaly Detection",
+            "Shift Handover", "Lab Inventory", "Reports", "Compliance Reports",
+            "User Management"
+        ]
         
-        if app_mode != st.session_state.last_tab:
-            st.session_state.last_tab = app_mode
-            if st.session_state.authenticated and st.session_state.username:
-                try:
-                    # First try the dedicated update method if available
-                    if hasattr(st.session_state.db, 'update_user_last_tab'):
-                        st.session_state.db.update_user_last_tab(st.session_state.username, app_mode)
-                    # Fallback to direct query execution if method not available
-                    elif hasattr(st.session_state.db, 'execute_query'):
-                        query = """
-                            UPDATE users 
-                            SET last_tab = %s 
-                            WHERE username = %s
-                        """
-                        result = st.session_state.db.execute_query(query, (app_mode, st.session_state.username))
-                        if result.empty:
-                            st.warning("Could not update last tab in database")
-                    else:
-                        st.warning("Database doesn't support tab tracking updates")
-                except Exception as e:
-                    st.warning(f"Could not update last tab: {str(e)}")
-                    # Ensure we don't show this warning for fallback database
-                    if not isinstance(st.session_state.db, FallbackDatabase):
-                        st.warning("Tab preference won't be saved between sessions")
+        # Filter tabs based on user role
+        filtered_tabs = [tab for tab in tab_options if tab in allowed_pages]
+        
+        # Create tabs - IMPORTANT: This must be at the top level of the function
+        tabs = st.tabs(filtered_tabs)
+        
+        # Map tab names to their content functions
+        tab_content_map = {
+            "Dashboard": show_dashboard,
+            "Data Entry": show_data_entry,
+            "Visualizations": show_visualizations,
+            "SPC Analysis": lambda: st.session_state.app_modules['display_spc_page']() if 'display_spc_page' in st.session_state.app_modules else st.error("SPC Analysis module not available"),
+            "Process Capability": show_process_capability,
+            "Trend Prediction": lambda: st.session_state.app_modules['display_prediction_page']() if 'display_prediction_page' in st.session_state.app_modules else st.error("Trend Prediction module not available"),
+            "Anomaly Detection": lambda: st.session_state.app_modules['display_anomaly_detection_page']() if 'display_anomaly_detection_page' in st.session_state.app_modules else st.error("Anomaly Detection module not available"),
+            "Shift Handover": show_shift_handover,
+            "Lab Inventory": show_lab_inventory,
+            "Reports": show_reports,
+            "Compliance Reports": lambda: st.session_state.app_modules['display_compliance_report_page'](edit_mode=check_permission('edit', 'all_data') or check_permission('edit', 'own_data')) if 'display_compliance_report_page' in st.session_state.app_modules else st.error("Compliance Reports module not available"),
+            "User Management": show_user_management
+        }
 
-    # Performance debug (only for admins/supervisors)
-    if st.session_state.get('role') in ['admin', 'supervisor'] and st.checkbox("Show Performance", False):
-        current_time = time.time()
-        load_time = current_time - APP_START_TIME
+        # Render content for each tab
+        for tab, tab_name in zip(tabs, filtered_tabs):
+            with tab:
+                if tab_name in tab_content_map:
+                    try:
+                        # Add a container to help with layout
+                        with st.container():
+                            tab_content_map[tab_name]()
+                    except Exception as e:
+                        st.error(f"Error loading {tab_name}: {str(e)}")
+                else:
+                    st.warning(f"Content not defined for {tab_name}")
         
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("App Load Time", f"{load_time:.2f}s")
-        with col2:
-            st.metric("Current Time", dt.datetime.now().strftime("%H:%M:%S"))
+        # Update last tab in session state
+        if 'last_tab' not in st.session_state:
+            st.session_state.last_tab = filtered_tabs[0]
         
-        st.caption(f"Python: {sys.version.split()[0]}")
-        st.caption(f"Streamlit: {st.__version__}")
+        # Track tab changes (this requires JavaScript integration)
+        st.markdown("""
+            <script>
+                const tabs = document.querySelectorAll('.stTabs [role="tab"]');
+                tabs.forEach(tab => {
+                    tab.addEventListener('click', () => {
+                        const tabName = tab.textContent.trim();
+                        window.parent.postMessage({
+                            type: 'streamlit:setComponentValue',
+                            value: tabName
+                        }, '*');
+                    });
+                });
+            </script>
+        """, unsafe_allow_html=True)
 
 # =============================================
 # Main Application Router
@@ -1181,105 +1280,16 @@ if not check_system_health():
     st.button("Retry Initialization", on_click=lambda: st.cache_resource.clear() or st.session_state.clear() or st.session_state.needs_rerun)
     st.stop()
 
-if not st.session_state.get('authenticated'):
-    # Show login page or dashboard for guests
-    if 'app_mode' not in locals() or app_mode == "Dashboard":
-        show_dashboard()
-    else:
-        st.warning("Please log in to access this page")
-elif app_mode == "Dashboard":
-    show_dashboard()
-elif app_mode == "Data Entry":
-    show_data_entry()
-elif app_mode == "Visualizations":
-    show_visualizations()
-elif app_mode == "SPC Analysis":
-    if 'display_spc_page' in st.session_state.app_modules:
-        st.session_state.app_modules['display_spc_page']()
-    else:
-        st.error("SPC Analysis module not available")
-elif app_mode == "Process Capability":
-    if 'display_capability_page' in st.session_state.app_modules:
-        # Date range selector for capability analysis
-        st.sidebar.subheader("Date Range for Analysis")
-        today = dt.date.today()
-        start_date = st.sidebar.date_input(
-            "Start Date", 
-            today - dt.timedelta(days=30),
-            max_value=today
-        )
-        end_date = st.sidebar.date_input(
-            "End Date", 
-            today,
-            min_value=start_date,
-            max_value=today
-        )
-        
-        # Load data with appropriate permissions
-        with st.spinner(f"Loading data from {start_date} to {end_date}..."):
-            try:
-                if check_permission('view', 'all_data'):
-                    data = st.session_state.get_check_data(start_date, end_date)
-                elif check_permission('edit', 'own_data'):
-                    data = st.session_state.db.get_user_checks(
-                        st.session_state.username,
-                        start_date=start_date,
-                        end_date=end_date
-                    )
-                else:
-                    data = st.session_state.db.get_public_checks(
-                        start_date=start_date,
-                        end_date=end_date
-                    )
-                
-                if data.empty:
-                    st.warning(f"No data available between {start_date} and {end_date}")
-                    st.stop()
-                
-                # Determine edit mode based on permissions
-                edit_mode = check_permission('edit', 'all_data') or check_permission('edit', 'own_data')
-                st.session_state.app_modules['display_capability_page'](
-                    data=data,
-                    edit_mode=edit_mode
-                )
-            except Exception as e:
-                st.error(f"Error loading data: {str(e)}")
-                st.stop()
-    else:
-        st.error("Process Capability module not available")
-elif app_mode == "Trend Prediction":
-    if 'display_prediction_page' in st.session_state.app_modules:
-        st.session_state.app_modules['display_prediction_page']()
-    else:
-        st.error("Trend Prediction module not available")
-elif app_mode == "Anomaly Detection":
-    if 'display_anomaly_detection_page' in st.session_state.app_modules:
-        st.session_state.app_modules['display_anomaly_detection_page']()
-    else:
-        st.error("Anomaly Detection module not available")
-elif app_mode == "Shift Handover":
-    if 'display_shift_handover_page' in st.session_state.app_modules:
-        edit_mode = check_permission('edit', 'all_data') or check_permission('edit', 'own_data')
-        st.session_state.app_modules['display_shift_handover_page'](edit_mode=edit_mode)
-    else:
-        st.error("Shift Handover module not available")
-elif app_mode == "Lab Inventory":
-    if 'display_lab_inventory_page' in st.session_state.app_modules:
-        edit_mode = check_permission('edit', 'all_data') or check_permission('edit', 'own_data')
-        comment_mode = check_permission('comment')
-        st.session_state.app_modules['display_lab_inventory_page'](
-            edit_mode=edit_mode,
-            comment_mode=comment_mode
-        )
-    else:
-        st.error("Lab Inventory module not available")
-elif app_mode == "Reports":
-    show_reports()
-elif app_mode == "Compliance Reports":
-    if 'display_compliance_report_page' in st.session_state.app_modules:
-        edit_mode = check_permission('edit', 'all_data') or check_permission('edit', 'own_data')
-        st.session_state.app_modules['display_compliance_report_page'](edit_mode=edit_mode)
-    else:
-        st.error("Compliance Reports module not available")
-elif app_mode == "User Management":
-    show_user_management()
+# Check for logout action - Correct query params handling
+if "logout" in st.query_params:
+    logout()
+    st.session_state.show_login_page = True
+    # To clear the query parameter, we need to update the URL
+    st.query_params.clear()
+    st.rerun()
+
+# Show either login page or main app
+if not st.session_state.authenticated or st.session_state.show_login_page:
+    show_auth_page()
+else:
+    show_main_app()
