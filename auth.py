@@ -101,11 +101,16 @@ def create_user(username, password, role='operator'):
         return False, "Username must be at least 4 characters"
     if len(password) < 8:
         return False, "Password must be at least 8 characters"
-    if role not in ['operator', 'supervisor', 'admin']:
+    if role not in ['operator', 'supervisor', 'admin', 'viewer']:
         return False, "Invalid role specified"
         
     try:
-        db = BeverageQADatabase()
+         # Use the existing database instance from session state
+        if 'db' not in st.session_state or st.session_state.db is None:
+            return False, "Database not initialized"
+            
+        db = st.session_state.db  # ← Use the existing instance!
+        # db = BeverageQADatabase()
         
         # 1. Verify database connection
         if not db.test_connection():
