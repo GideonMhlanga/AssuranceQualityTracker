@@ -38,7 +38,7 @@ required_keys = {
 for key, default_value in required_keys.items():
     if key not in st.session_state:
         st.session_state[key] = default_value
-        
+
 # =============================================
 # Environment Configuration
 # =============================================
