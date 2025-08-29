@@ -9465,3 +9465,57 @@ server closed the connection unexpectedly
 2025-08-30 01:43:24,805 - database - INFO - Testing database connection
 2025-08-30 01:43:27,178 - database - INFO - Database connection test passed
 2025-08-30 01:43:27,179 - database - INFO - Database initialization successful
+2025-08-30 01:56:49,538 - database - INFO - Database initialization attempt 1/3
+2025-08-30 01:56:49,540 - database - INFO - Testing database connection
+2025-08-30 01:56:49,541 - database - INFO - Creating new database engine
+2025-08-30 01:56:49,723 - database - INFO - Database engine created successfully
+2025-08-30 01:56:58,486 - database - INFO - Database connection test passed
+2025-08-30 01:56:58,487 - database - INFO - Initializing database tables
+2025-08-30 01:57:02,786 - database - INFO - Database initialization completed successfully
+2025-08-30 01:57:02,788 - database - INFO - Testing database connection
+2025-08-30 01:57:05,859 - database - INFO - Database connection test passed
+2025-08-30 01:57:05,860 - database - INFO - Database initialization successful
+2025-08-30 01:57:06,835 - database - INFO - Database initialization attempt 1/3
+2025-08-30 01:57:06,836 - database - INFO - Testing database connection
+2025-08-30 01:57:06,836 - database - INFO - Creating new database engine
+2025-08-30 01:57:06,838 - database - INFO - Database engine created successfully
+2025-08-30 01:57:15,178 - database - INFO - Database connection test passed
+2025-08-30 01:57:15,179 - database - INFO - Initializing database tables
+2025-08-30 01:57:18,863 - database - INFO - Database initialization completed successfully
+2025-08-30 01:57:18,864 - database - INFO - Testing database connection
+2025-08-30 01:57:21,629 - database - INFO - Database connection test passed
+2025-08-30 01:57:21,630 - database - INFO - Database initialization successful
+2025-08-30 01:57:25,036 - database - INFO - Database initialization attempt 1/3
+2025-08-30 01:57:25,036 - database - INFO - Testing database connection
+2025-08-30 01:57:25,037 - database - INFO - Creating new database engine
+2025-08-30 01:57:25,039 - database - INFO - Database engine created successfully
+2025-08-30 01:57:33,140 - database - INFO - Database connection test passed
+2025-08-30 01:57:33,140 - database - INFO - Initializing database tables
+2025-08-30 01:57:36,403 - database - INFO - Database initialization completed successfully
+2025-08-30 01:57:36,404 - database - INFO - Testing database connection
+2025-08-30 01:57:39,139 - database - INFO - Database connection test passed
+2025-08-30 01:57:39,139 - database - INFO - Database initialization successful
+2025-08-30 01:57:41,728 - database - INFO - Database initialization attempt 1/3
+2025-08-30 01:57:41,729 - database - INFO - Testing database connection
+2025-08-30 01:57:41,730 - database - INFO - Creating new database engine
+2025-08-30 01:57:41,732 - database - INFO - Database engine created successfully
+2025-08-30 01:57:50,198 - database - INFO - Database connection test passed
+2025-08-30 01:57:50,199 - database - INFO - Initializing database tables
+2025-08-30 01:57:54,704 - database - INFO - Database initialization completed successfully
+2025-08-30 01:57:54,705 - database - INFO - Testing database connection
+2025-08-30 01:57:57,468 - database - INFO - Database connection test passed
+2025-08-30 01:57:57,469 - database - INFO - Database initialization successful
+2025-08-30 01:57:57,470 - database - INFO - Testing database connection
+2025-08-30 01:58:00,495 - database - INFO - Database connection test passed
+2025-08-30 01:58:00,605 - database - INFO - Database initialization attempt 1/3
+2025-08-30 01:58:00,607 - database - INFO - Testing database connection
+2025-08-30 01:58:00,608 - database - INFO - Creating new database engine
+2025-08-30 01:58:00,610 - database - INFO - Database engine created successfully
+2025-08-30 01:58:09,347 - database - INFO - Database connection test passed
+2025-08-30 01:58:09,348 - database - INFO - Initializing database tables
+2025-08-30 01:58:12,862 - database - INFO - Database initialization completed successfully
+2025-08-30 01:58:12,862 - database - INFO - Testing database connection
+2025-08-30 01:58:15,401 - database - INFO - Database connection test passed
+2025-08-30 01:58:15,402 - database - INFO - Database initialization successful
+2025-08-30 01:58:15,403 - database - INFO - Testing database connection
+2025-08-30 01:58:17,949 - database - INFO - Database connection test passed

@@ -156,16 +156,13 @@ def create_user_if_not_exists(username, password, role='operator'):
 
 def logout():
     """Completely clear session state and reset authentication"""
-    # Clear all session state except initialization flags
-    # Store initialization state
-    init_state = {
-        'init_phase': st.session_state.get('init_phase'),
-        'db': st.session_state.get('db'),
-        'app_modules': st.session_state.get('app_modules'),
-        'viz_modules': st.session_state.get('viz_modules'),
-        'report_modules': st.session_state.get('report_modules'),
-        'form_modules': st.session_state.get('form_modules')
-    }
+    # Store initialization state safely
+    keys_to_preserve = ['init_phase', 'db', 'app_modules', 'viz_modules', 'report_modules', 'form_modules']
+    init_state = {}
+    
+    for key in keys_to_preserve:
+        if key in st.session_state:
+            init_state[key] = st.session_state[key]
     
     st.session_state.clear()
     
