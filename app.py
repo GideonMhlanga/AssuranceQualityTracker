@@ -17,10 +17,6 @@ from auth import (
     show_login_form, 
     initialize_session
 )
-
-# =============================================
-# Early session state initialization
-# =============================================
 if 'db' not in st.session_state:
     st.session_state.db = None
     st.session_state.get_check_data = lambda *args, **kwargs: pd.DataFrame()
@@ -42,12 +38,7 @@ required_keys = {
 for key, default_value in required_keys.items():
     if key not in st.session_state:
         st.session_state[key] = default_value
-
-# Rerun handling at the top level
-if st.session_state.needs_rerun:
-    st.session_state.needs_rerun = False
-    st.rerun()
-
+        
 # =============================================
 # Environment Configuration
 # =============================================
@@ -1279,6 +1270,10 @@ if not check_system_health():
     st.error("Critical system components failed to initialize")
     st.button("Retry Initialization", on_click=lambda: st.cache_resource.clear() or st.session_state.clear() or st.session_state.needs_rerun)
     st.stop()
+
+# Initialize authentication state properly
+if 'authenticated' not in st.session_state:
+    initialize_session()
 
 # Check for logout action - Correct query params handling
 if "logout" in st.query_params:

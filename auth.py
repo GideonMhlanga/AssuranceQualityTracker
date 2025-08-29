@@ -150,12 +150,18 @@ def create_user_if_not_exists(username, password, role='operator'):
     return create_user(username, password, role)
 
 def logout():
-    """
-    Clear the user session and reset authentication state.
-    Also triggers a rerun to refresh the page.
-    """
-    st.session_state.clear()
-    st.rerun()
+    """Clear authentication state and redirect to login"""
+    st.session_state.authenticated = False
+    st.session_state.username = None
+    st.session_state.role = None
+    st.session_state.show_login_page = True
+    st.session_state.form_type = None
+    st.session_state.start_time = None
+    st.session_state.check_id = None
+    
+    # Clear any query parameters
+    if hasattr(st, 'query_params'):
+        st.query_params.clear()
 
 def get_current_user():
     """
@@ -210,6 +216,14 @@ def require_role(*required_roles):
 
 def show_login_form():
     """Display login form with registration option and emergency admin creation"""
+
+    import uuid
+    form_id = str(uuid.uuid4())[:8]  # Use first 8 chars for readability
+
+    # Remove counter increment and use stable keys
+    login_form_key = "login_form"
+    register_form_key = "register_form"
+
     # Temporary admin creation (remove after first admin exists)
     try:
         # Check if any admin exists using get_all_users_data()
@@ -262,7 +276,7 @@ def show_login_form():
     tab1, tab2 = st.tabs(["Login", "Register"])
     
     with tab1:
-        with st.form("login_form"):
+        with st.form(login_form_key):
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
             
@@ -270,7 +284,7 @@ def show_login_form():
                 return authenticate_user(username, password)
     
     with tab2:
-        with st.form("registration form"):
+        with st.form(register_form_key):
             st.subheader("New User Registration")
             new_username = st.text_input("New Username", help="Must be 3-20 characters, letters and numbers only")
             new_password = st.text_input("New Password", type="password", 
