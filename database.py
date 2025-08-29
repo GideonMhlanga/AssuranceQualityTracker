@@ -706,7 +706,7 @@ class BeverageQADatabase:
             return False, "Invalid password hash"
         
         # Role validation
-        valid_roles = ['admin', 'supervisor', 'operator', 'viewer']
+        valid_roles = ['admin', 'supervisor', 'operator', 'viewer', 'guest']
         if role not in valid_roles:
             return False, f"Invalid role. Must be one of: {', '.join(valid_roles)}"
         

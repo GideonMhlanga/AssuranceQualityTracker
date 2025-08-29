@@ -101,7 +101,7 @@ def create_user(username, password, role='operator'):
         return False, "Username must be at least 4 characters"
     if len(password) < 8:
         return False, "Password must be at least 8 characters"
-    if role not in ['operator', 'supervisor', 'admin', 'viewer']:
+    if role not in ['operator', 'supervisor', 'admin', 'viewer', 'guest']:
         return False, "Invalid role specified"
         
     try:
@@ -166,7 +166,7 @@ def logout():
     for key in keys_to_keep:
         if key in current_state:
             st.session_state[key] = current_state[key]
-            
+
     """Clear authentication state and redirect to login"""
     st.session_state.authenticated = False
     st.session_state.username = None
