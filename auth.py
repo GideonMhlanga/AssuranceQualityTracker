@@ -157,28 +157,39 @@ def create_user_if_not_exists(username, password, role='operator'):
 def logout():
     """Completely clear session state and reset authentication"""
     # Clear all session state except initialization flags
-    keys_to_keep = ['init_phase', 'db', 'app_modules', 'viz_modules', 'report_modules', 'form_modules']
-    current_state = st.session_state.copy()
+    # Store initialization state
+    init_state = {
+        'init_phase': st.session_state.get('init_phase'),
+        'db': st.session_state.get('db'),
+        'app_modules': st.session_state.get('app_modules'),
+        'viz_modules': st.session_state.get('viz_modules'),
+        'report_modules': st.session_state.get('report_modules'),
+        'form_modules': st.session_state.get('form_modules')
+    }
     
     st.session_state.clear()
     
     # Restore only the necessary initialization keys
-    for key in keys_to_keep:
-        if key in current_state:
-            st.session_state[key] = current_state[key]
+    for key, value in init_state.items():
+        if value is not None:
+            st.session_state[key] = value
 
     """Clear authentication state and redirect to login"""
-    st.session_state.authenticated = False
-    st.session_state.username = None
-    st.session_state.role = None
-    st.session_state.show_login_page = True
-    st.session_state.form_type = None
-    st.session_state.start_time = None
-    st.session_state.check_id = None
-    
+    st.session_state.update({
+        'authenticated': False,
+        'username': None,
+        'role': None,
+        'show_login_page': True,
+        'form_type': None,
+        'start_time': None,
+        'check_id': None
+    })
+
     # Clear any query parameters
     if hasattr(st, 'query_params'):
         st.query_params.clear()
+
+    st.rerun()
 
 def get_current_user():
     """

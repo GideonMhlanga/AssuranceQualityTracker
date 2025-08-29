@@ -1192,11 +1192,14 @@ def show_main_app():
         user_col, empty_col = st.columns([1, 5])
         with user_col:
             if st.session_state.authenticated:
+                # Use a proper Streamlit button for logout instead of HTML
+                if st.button("Logout", key="logout_button"):
+                    logout()
+
                 st.markdown(f"""
-                    <div style="text-align: right; margin-bottom: 20px;">
-                        <strong>{st.session_state.username}</strong> ({st.session_state.role})  
-                        <a href="#" onclick="window.location.href='?logout=true'; return false;" style="color: #ff4b4b; text-decoration: none;">Logout</a>
-                    </div>
+                <div style="text-align: right; margin-bottom: 20px;">
+                    <strong>{st.session_state.username}</strong> ({st.session_state.role})
+                </div>
                 """, unsafe_allow_html=True)
         
         # Get allowed pages based on role
@@ -1287,4 +1290,10 @@ if "logout" in st.query_params:
 if not st.session_state.authenticated or st.session_state.show_login_page:
     show_auth_page()
 else:
-    show_main_app()
+    # For guest users, limit access to viewing pages only
+    if st.session_state.role == 'guest':
+        # Create a simplified interface for guests
+        st.sidebar.info("You are viewing as a guest. Some features are limited.")
+        show_dashboard()  # Only show dashboard for guests
+    else:
+        show_main_app()  # Full app for authenticated users
