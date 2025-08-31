@@ -167,11 +167,6 @@ st.set_page_config(
 
 APP_START_TIME = time.time()
 
-# Show loading spinner immediately
-loading_placeholder = st.empty()
-with loading_placeholder:
-    st.spinner("Initializing application...")
-
 # =============================================
 # Lazy Loaded Modules (Cached Resources)
 # =============================================
@@ -351,57 +346,39 @@ def load_other_modules():
 # =============================================
 if st.session_state.init_phase == 'starting':
     try:
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        def update_status(step, total, message):
-            progress = min(step/total, 1.0)
-            progress_bar.progress(progress)
-            status_text.text(f"Initializing... ({int(progress*100)}%) {message}")
-        
         # Load modules
-        update_status(1, 5, "Loading core modules...")
-        st.session_state.app_modules = load_other_modules()
+            st.session_state.app_modules = load_other_modules()
+            
+            try:
+                from database import BeverageQADatabase
+                online_db = BeverageQADatabase()
+                if hasattr(online_db, 'test_connection') and online_db.test_connection():
+                    try:
+                        from hybrid_db import HybridDatabase
+                        st.session_state.db = HybridDatabase(online_db)
+                        st.session_state.get_check_data = online_db.get_check_data
+                    except ImportError:
+                        st.warning("Using direct database connection")
+                        st.session_state.db = online_db
+                        st.session_state.get_check_data = online_db.get_check_data
+                else:
+                    raise ConnectionError("Online database failed")
+            except Exception as e:
+                st.warning(f"Using fallback database: {str(e)}")
+                st.session_state.db = FallbackDatabase()
+                st.session_state.get_check_data = lambda *args, **kwargs: pd.DataFrame()
+            
+            st.session_state.form_modules = load_form_modules()
         
-        update_status(2, 5, "Connecting to database...")
-        try:
-            from database import BeverageQADatabase
-            online_db = BeverageQADatabase()
-            if hasattr(online_db, 'test_connection') and online_db.test_connection():
-                try:
-                    from hybrid_db import HybridDatabase
-                    st.session_state.db = HybridDatabase(online_db)
-                    st.session_state.get_check_data = online_db.get_check_data
-                except ImportError:
-                    st.warning("Using direct database connection")
-                    st.session_state.db = online_db
-                    st.session_state.get_check_data = online_db.get_check_data
-            else:
-                raise ConnectionError("Online database failed")
-        except Exception as e:
-            st.warning(f"Using fallback database: {str(e)}")
-            st.session_state.db = FallbackDatabase()
-            st.session_state.get_check_data = lambda *args, **kwargs: pd.DataFrame()
-        
-        update_status(3, 5, "Loading forms...")
-        st.session_state.form_modules = load_form_modules()
-        
-        update_status(4, 5, "Loading visualizations...")
-        st.session_state.viz_modules = load_visualization_modules()
-        
-        update_status(5, 5, "Loading reports...")
-        st.session_state.report_modules = load_report_modules()
-        
-        st.session_state.init_phase = 'ready'
-        
+            st.session_state.viz_modules = load_visualization_modules()
+            
+            st.session_state.report_modules = load_report_modules()
+            
+            st.session_state.init_phase = 'ready'
+            
     except Exception as e:
         st.session_state.init_phase = 'failed'
-        st.error(f"Initialization error: {str(e)}")
-    finally:
-        if 'progress_bar' in locals():
-            progress_bar.empty()
-        if 'status_text' in locals():
-            status_text.empty()
+        st.error(f"Initialization error: {str(e)}")   
 
 if st.session_state.init_phase == 'failed':
     if st.button("Retry Initialization"):
@@ -409,7 +386,6 @@ if st.session_state.init_phase == 'failed':
         st.session_state.clear()
         st.session_state.needs_rerun = True
     st.stop()
-
 
 # =============================================
 # Helper Functions

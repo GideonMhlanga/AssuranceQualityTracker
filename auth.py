@@ -243,11 +243,18 @@ def show_login_form():
     """Display login form with registration option and emergency admin creation"""
 
     import uuid
-    form_id = str(uuid.uuid4())[:8]  # Use first 8 chars for readability
 
-    # Remove counter increment and use stable keys
-    login_form_key = "login_form"
-    register_form_key = "register_form"
+    # Check if we're already authenticated
+    if st.session_state.get('authenticated', False):
+        return True
+    
+#    form_id = str(uuid.uuid4())[:8]  # Use first 8 chars for readability
+
+    # Initialize form keys in session state if they don't exist
+    if 'login_form_key' not in st.session_state:
+        st.session_state.login_form_key = f"login_form_{str(uuid.uuid4())[:8]}"
+    if 'register_form_key' not in st.session_state:
+        st.session_state.register_form_key = f"register_form_{str(uuid.uuid4())[:8]}"
 
     # Temporary admin creation (remove after first admin exists)
     try:
@@ -262,11 +269,11 @@ def show_login_form():
         with st.expander("⚠️ INITIAL ADMIN SETUP", expanded=True):
             st.warning("No admin account detected. Create your first admin account:")
             
-            admin_username = st.text_input("Admin Username", key="admin_username")
-            admin_password = st.text_input("Admin Password", type="password", key="admin_password")
-            confirm_password = st.text_input("Confirm Password", type="password", key="admin_confirm")
+            admin_username = st.text_input("Admin Username", key=f"admin_username")
+            admin_password = st.text_input("Admin Password", type="password", key=f"admin_password")
+            confirm_password = st.text_input("Confirm Password", type="password", key=f"admin_confirm")
             
-            if st.button("Create Admin Account"):
+            if st.button("Create Admin Account", key=f"create_admin"):
                 # Validation
                 if not re.match(r'^[a-zA-Z0-9_]{3,20}$', admin_username):
                     st.error("Username must be 3-20 characters (letters, numbers, underscores)")
@@ -301,20 +308,20 @@ def show_login_form():
     tab1, tab2 = st.tabs(["Login", "Register"])
     
     with tab1:
-        with st.form(login_form_key):
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
+        with st.form(st.session_state.login_form_key):
+            username = st.text_input("Username", key=f"login_username")
+            password = st.text_input("Password", type="password", key=f"login_password")
             
             if st.form_submit_button("Login"):
                 return authenticate_user(username, password)
     
     with tab2:
-        with st.form(register_form_key):
+        with st.form(st.session_state.register_form_key):
             st.subheader("New User Registration")
-            new_username = st.text_input("New Username", help="Must be 3-20 characters, letters and numbers only")
-            new_password = st.text_input("New Password", type="password", 
+            new_username = st.text_input("New Username", key=f"reg_username", help="Must be 3-20 characters, letters and numbers only")
+            new_password = st.text_input("New Password", type="password", key=f"reg_password",
                                        help="Minimum 8 characters with at least 1 number")
-            confirm_password = st.text_input("Confirm Password", type="password")
+            confirm_password = st.text_input("Confirm Password", type="password", key=f"reg_confirm")
             
             # Get current user role if logged in (for admin registration)
             current_role = st.session_state.get('role', 'guest')
@@ -329,7 +336,8 @@ def show_login_form():
             
             role = st.selectbox("Account Type", role_options, 
                                index=role_options.index(default_role),
-                               help="Select your role in the system")
+                               help="Select your role in the system",
+                               key=f"role_select")
             
             if st.form_submit_button("Register"):
                 # Validation
